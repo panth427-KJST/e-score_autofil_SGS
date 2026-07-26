@@ -86,7 +86,11 @@
         var el = document.getElementById(prefix + '_' + f);
         if (el) fields[f] = el;
       });
-      map[sids[i]] = { fields: fields, prefix: prefix, rowIndex: i };
+      // เก็บทั้ง key เดิม และ key แบบตัดศูนย์นำหน้า เพื่อจับคู่ได้แม้ข้อมูลศูนย์หลุด
+      var rec = { fields: fields, prefix: prefix, rowIndex: i };
+      map[sids[i]] = rec;
+      var noZero = sids[i].replace(/^0+/, '');
+      if (noZero && noZero !== sids[i]) map[noZero] = rec;
       order.push(sids[i]);
     }
     return { map: map, order: order, inputCount: s1s.length, sidCount: sids.length };
@@ -168,7 +172,7 @@
 
     for (var i = 0; i < parsed.rows.length; i++) {
       var rec = parsed.rows[i];
-      var target = tbl.map[rec.sid];
+      var target = tbl.map[rec.sid] || tbl.map[rec.sid.replace(/^0+/, '')];
       if (!target) { notFound.push(rec.sid); continue; }
       var touched = false;
       var keys = Object.keys(rec.values);
