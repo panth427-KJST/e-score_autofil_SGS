@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '2.0';
+  var VERSION = '2.1';
 
   // ---- กันเปิดซ้ำ: ถ้ากล่องมีอยู่แล้วให้สลับซ่อน/แสดง ----
   var existing = document.getElementById('kjst-sgs-box');
@@ -211,7 +211,7 @@
     wrap.id = 'kjst-sgs-box';
     wrap.innerHTML = [
       '<div class="kjst-h">KJST → SGS เติมคะแนน',
-      '  <span class="kjst-hr"><span id="kjst-help" title="วิธีใช้">?</span><span id="kjst-min" title="ย่อ/ขยาย">–</span></span>',
+      '  <span class="kjst-hr"><span id="kjst-help" title="วิธีใช้">?</span><span id="kjst-min" title="ย่อ/ขยาย">–</span><span id="kjst-close" title="ปิด">✕</span></span>',
       '</div>',
       '<div class="kjst-body">',
       '  <div id="kjst-guide" class="kjst-note">',
@@ -221,7 +221,7 @@
       '    3. ครั้งแรกเปิด <b>"ทดลอง"</b> กดดูว่าจับคู่ถูก (ช่องขึ้นสีส้ม)<br>',
       '    4. ถูกแล้ว เอา "ทดลอง" ออก กดอีกครั้งเพื่อบันทึกจริง',
       '  </div>',
-      '  <textarea id="kjst-ta" rows="6" placeholder="วางข้อมูลจาก e-Score ที่นี่&#10;บรรทัดแรก = หัวตาราง เช่น:&#10;เลขประจำตัว   หน่วย1   หน่วย2   หน่วย3   หน่วย4   กลางภาค"></textarea>',
+      '  <textarea id="kjst-ta" rows="8" placeholder="วางข้อมูลจาก e-Score ที่นี่&#10;บรรทัดแรก = หัวตาราง เช่น:&#10;เลขประจำตัว   หน่วย1   หน่วย2   หน่วย3   หน่วย4   กลางภาค"></textarea>',
       '  <div class="kjst-row"><label>ความเร็ว: <select id="kjst-speed">',
       '    <option value="fast">เร็ว (~15 วิ/30 คน)</option>',
       '    <option value="medium">ปานกลาง (~22 วิ)</option>',
@@ -231,7 +231,10 @@
       '    <label><input type="checkbox" id="kjst-dry" checked> ทดลอง (ไม่บันทึกจริง)</label>',
       '    <label><input type="checkbox" id="kjst-ow" checked> ทับค่าเดิม</label>',
       '  </div>',
-      '  <button id="kjst-go">เติมคะแนนลงตาราง</button>',
+      '  <div class="kjst-btnrow">',
+      '    <button id="kjst-go">เติมคะแนนลงตาราง</button>',
+      '    <button id="kjst-clear" title="ล้างข้อมูลที่วาง เตรียมวางชุดใหม่">ล้างข้อมูล</button>',
+      '  </div>',
       '  <div id="kjst-out" class="kjst-out"></div>',
       '  <div class="kjst-ver">v' + VERSION + '</div>',
       '</div>'
@@ -240,28 +243,33 @@
 
     var style = document.createElement('style');
     style.textContent = [
-      '#kjst-sgs-box{position:fixed;top:80px;right:16px;width:340px;z-index:2147483647;',
+      '#kjst-sgs-box{position:fixed;top:60px;right:16px;width:340px;z-index:2147483647;',
       'font-family:Tahoma,"Sarabun",sans-serif;font-size:12px;background:#fff;border:1px solid #2c3e50;',
-      'border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.3)}',
+      'border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.3);max-height:calc(100vh - 80px);display:flex;flex-direction:column}',
       '#kjst-sgs-box .kjst-h{background:#2c3e50;color:#fff;padding:8px 10px;border-radius:7px 7px 0 0;',
-      'font-weight:bold;cursor:move;display:flex;justify-content:space-between;align-items:center}',
+      'font-weight:bold;cursor:move;display:flex;justify-content:space-between;align-items:center;flex:0 0 auto}',
       '#kjst-sgs-box .kjst-hr{display:flex;gap:4px}',
-      '#kjst-sgs-box .kjst-hr span{cursor:pointer;padding:0 7px;border-radius:3px;background:rgba(255,255,255,.15)}',
+      '#kjst-sgs-box .kjst-hr span{cursor:pointer;padding:0 7px;border-radius:3px;background:rgba(255,255,255,.15);line-height:20px}',
       '#kjst-sgs-box .kjst-hr span:hover{background:rgba(255,255,255,.3)}',
-      '#kjst-sgs-box .kjst-body{padding:10px}',
+      '#kjst-sgs-box #kjst-close:hover{background:#c0392b}',
+      '#kjst-sgs-box .kjst-body{padding:10px;overflow-y:auto;flex:1 1 auto}',
       '#kjst-sgs-box .kjst-note{background:#fef9e7;border:1px solid #f1c40f;padding:8px;border-radius:4px;margin-bottom:8px;line-height:1.7}',
-      '#kjst-sgs-box textarea{width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;border:1px solid #bbb;border-radius:4px;padding:5px}',
+      '#kjst-sgs-box textarea{width:100%;box-sizing:border-box;font-family:monospace;font-size:12px;border:1px solid #bbb;border-radius:4px;padding:5px;resize:vertical}',
       '#kjst-sgs-box .kjst-row{margin:7px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap}',
       '#kjst-sgs-box select{font-size:12px;padding:2px}',
       '#kjst-sgs-box label{cursor:pointer}',
-      '#kjst-go{width:100%;padding:9px;background:#27ae60;color:#fff;border:0;border-radius:4px;',
-      'font-size:14px;font-weight:bold;cursor:pointer;margin-top:2px}',
+      '#kjst-sgs-box .kjst-btnrow{display:flex;gap:8px;margin-top:2px}',
+      '#kjst-go{flex:1 1 auto;padding:9px;background:#27ae60;color:#fff;border:0;border-radius:4px;',
+      'font-size:14px;font-weight:bold;cursor:pointer}',
       '#kjst-go:hover{background:#219150}#kjst-go:disabled{background:#95a5a6;cursor:wait}',
-      '.kjst-out{margin-top:8px;max-height:190px;overflow:auto;background:#f8f9fa;border:1px solid #ddd;',
+      '#kjst-clear{flex:0 0 auto;padding:9px 14px;background:#fff;color:#c0392b;border:1.5px solid #e0b4b0;',
+      'border-radius:4px;font-size:13px;font-weight:600;cursor:pointer}',
+      '#kjst-clear:hover{background:#fdecea}',
+      '.kjst-out{margin-top:8px;max-height:220px;overflow:auto;background:#f8f9fa;border:1px solid #ddd;',
       'padding:7px;border-radius:4px;line-height:1.7;white-space:pre-wrap}',
       '.kjst-out .ok{color:#27ae60;font-weight:bold}.kjst-out .err{color:#c0392b;font-weight:bold}',
       '.kjst-out .warn{color:#e67e22}',
-      '.kjst-ver{text-align:right;color:#aaa;font-size:10px;margin-top:4px}'
+      '.kjst-ver{text-align:right;color:#aaa;font-size:10px;margin-top:6px;padding-bottom:2px}'
     ].join('');
     document.head.appendChild(style);
 
@@ -275,12 +283,25 @@
     wrap.querySelector('#kjst-help').onclick = function () {
       guide.style.display = guide.style.display === 'none' ? 'block' : 'none';
     };
+    wrap.querySelector('#kjst-close').onclick = function () {
+      wrap.remove();
+      if (style && style.parentNode) style.parentNode.removeChild(style);
+    };
+    wrap.querySelector('#kjst-clear').onclick = function () {
+      wrap.querySelector('#kjst-ta').value = '';
+      wrap.querySelector('#kjst-out').innerHTML = '';
+      // ล้างไฮไลต์ช่องที่เคยทำไว้
+      document.querySelectorAll('input[id*="TblTranscriptsTableControlRepeater"]').forEach(function (el) {
+        el.style.outline = ''; el.title = '';
+      });
+      wrap.querySelector('#kjst-ta').focus();
+    };
 
     // ลากย้าย
     (function (handle, target) {
       var ox, oy, dragging = false;
       handle.addEventListener('mousedown', function (e) {
-        if (e.target.id === 'kjst-min' || e.target.id === 'kjst-help') return;
+        if (e.target.id === 'kjst-min' || e.target.id === 'kjst-help' || e.target.id === 'kjst-close') return;
         dragging = true; ox = e.clientX - target.offsetLeft; oy = e.clientY - target.offsetTop;
         e.preventDefault();
       });
