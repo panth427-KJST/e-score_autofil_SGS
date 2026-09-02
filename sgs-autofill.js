@@ -5,6 +5,13 @@
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  * ใช้กับหน้า SGS: บันทึกผลการเรียน กลางภาค (Edit-TblTranscripts1-Table.aspx)
  *
+ * v3.1 — ตรวจก่อนเติม:
+ *   - อ่านคะแนนเต็มของแต่ละช่องจาก SGS (ฝังใน onchange=CheckValue(...,'S1','15',...)) เทียบกับ
+ *     คะแนนเต็มที่ e-Score ส่งมาในบรรทัดหัว (full:...) — ไม่ตรงกัน = ไม่ให้เติม บอกให้แก้ SGS ก่อน
+ *   - อ่านวิชา/กลุ่มจาก dropdown ของ SGS เทียบรหัสวิชากับข้อมูลที่วาง — คนละวิชา = ไม่ให้เติม
+ *   - ตั้ง "จำนวนต่อหน้า" ให้เห็นครบทั้งกลุ่มอัตโนมัติ
+ *   - ยิง onchange ครั้งเดียวต่อช่อง (เดิมยิงซ้ำ 2 ครั้ง → SaveMe ซ้ำ) และรอ callback ของ SGS ก่อนตรวจค่ากลับ
+ *
  * v3 — วางครั้งเดียวต่อวิชา:
  *   - รับข้อมูลชุดเดียวที่มีหลายกลุ่ม (จากปุ่ม "ส่งคะแนนเข้า SGS" ใน e-Score)
  *   - ตรวจว่าหน้า SGS ที่เปิดอยู่ตรงกับกลุ่มไหน จากเลขประจำตัวบนหน้า (ไม่ต้องรู้ dropdown ของ SGS)
@@ -25,7 +32,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '3.0';
+  var VERSION = '3.1';
   var STORE_KEY = 'kjst_sgs_payload';      // localStorage (โดเมน SGS) จำข้อมูลที่วางล่าสุด
   var STORE_OPT = 'kjst_sgs_opts';         // ตัวเลือก (ความเร็ว)
 
@@ -123,7 +130,17 @@
     var meta = null, i = 0;
     if (/^#KJST-SGS/i.test(lines[0])) {
       var h = split(lines[0]).map(function (x) { return x.trim(); });
-      meta = { ver: h[0].replace(/^#KJST-SGS\s*/i, ''), code: h[1] || '', name: h[2] || '', term: h[3] || '', parts: h[4] || '' };
+      meta = { ver: h[0].replace(/^#KJST-SGS\s*/i, ''), code: h[1] || '', name: h[2] || '', term: h[3] || '', parts: h[4] || '', full: null };
+      // v3.1: full:หน่วย1=20,หน่วย2=15,กลางภาค=15 → { S1:20, S2:15, Midterm:15 }
+      var fs = h.filter(function (x) { return /^full:/i.test(x); })[0];
+      if (fs) {
+        meta.full = {};
+        fs.replace(/^full:/i, '').split(',').forEach(function (kv) {
+          var m = kv.split('=');
+          var f = FIELD_MAP[(m[0] || '').replace(/\s+/g, '')];
+          if (f && m[1] !== '' && !isNaN(parseFloat(m[1]))) meta.full[f] = parseFloat(m[1]);
+        });
+      }
       i = 1;
     }
 
@@ -166,6 +183,91 @@
   }
 
   /* --------------------------------------------------------------------------
+   * readSgsMax — คะแนนเต็มของแต่ละช่องที่ SGS ตั้งไว้
+   * แหล่งหลัก: onchange ของ input แถวแรก  CheckValue(..., 'S1','15', ...)
+   * แหล่งรอง: หัวตาราง <th> (checkbox + ลำดับ + <br> + คะแนนเต็ม)
+   * ------------------------------------------------------------------------ */
+  function readSgsMax(tbl) {
+    var max = {};
+    if (tbl.rows.length) {
+      FIELDS.forEach(function (f) {
+        var el = tbl.rows[0].fields[f];
+        if (!el) return;
+        var oc = el.getAttribute('onchange') || '';
+        var m = oc.match(/CheckValue\([^,]*,\s*'([^']+)'\s*,\s*'([^']*)'/);
+        if (m && m[1] === f && m[2] !== '' && !isNaN(parseFloat(m[2]))) max[f] = parseFloat(m[2]);
+      });
+    }
+    // fallback จากหัวตาราง
+    FIELDS.forEach(function (f) {
+      if (max[f] != null) return;
+      var cb = document.getElementById('ctl00_PageContent_Check' + (f === 'Midterm' ? 'M' : f.replace('S', '')));
+      var th = cb && cb.closest ? cb.closest('th') : null;
+      if (!th) return;
+      var t = (th.textContent || '').trim().split(/\s+/);
+      var last = t[t.length - 1];
+      if (last !== '' && !isNaN(parseFloat(last))) max[f] = parseFloat(last);
+    });
+    return max;
+  }
+
+  /* readSgsContext — วิชา/กลุ่ม/จำนวนรายการ ที่หน้า SGS เปิดอยู่ */
+  function readSgsContext() {
+    var ctx = { code: '', subject: '', section: '', total: null, pageSize: null };
+    var sel = document.getElementById('ctl00_PageContent_ClassSubjectIDFilter');
+    if (sel && sel.selectedIndex >= 0 && sel.value !== '--ANY--') {
+      ctx.subject = (sel.options[sel.selectedIndex].text || '').trim();
+      var m = ctx.subject.match(/^(\S+)/);
+      ctx.code = m ? m[1] : '';
+    }
+    var sec = document.getElementById('ctl00_PageContent_ClassSectionNoFilter');
+    if (sec && sec.value !== '--ANY--') ctx.section = sec.value;
+    var tot = document.getElementById('ctl00_PageContent_TblTranscriptsPagination__TotalItems');
+    if (tot) { var n = parseInt(tot.textContent, 10); if (!isNaN(n)) ctx.total = n; }
+    var ps = document.getElementById('ctl00_PageContent_TblTranscriptsPagination__PageSize');
+    if (ps) { var p = parseInt(ps.value, 10); if (!isNaN(p)) ctx.pageSize = p; }
+    return ctx;
+  }
+
+  /* ensurePageSize — ถ้าหน้าแสดงไม่ครบทั้งกลุ่ม ตั้งจำนวนต่อหน้าแล้ว postback (คืน true = สั่งโหลดใหม่แล้ว) */
+  function ensurePageSize(ctx, shown) {
+    if (ctx.total == null || shown >= ctx.total) return false;
+    var ps = document.getElementById('ctl00_PageContent_TblTranscriptsPagination__PageSize');
+    if (!ps || typeof window.__doPostBack !== 'function') return false;
+    ps.value = String(Math.max(50, ctx.total));
+    try { window.__doPostBack('ctl00$PageContent$TblTranscriptsPagination$_PageSizeButton', ''); } catch (e) { return false; }
+    return true;
+  }
+
+  /* checkFull — เทียบคะแนนเต็ม SGS กับ e-Score (หรือกับค่าสูงสุดที่จะส่ง ถ้าข้อมูลรุ่นเก่าไม่มี full) */
+  function checkFull(parsed, tbl, sgsMax) {
+    var used = {}, maxVal = {};
+    tbl.rows.forEach(function (r) {
+      var rec = parsed.index[r.sid];
+      if (!rec) return;
+      Object.keys(rec.values).forEach(function (f) {
+        used[f] = true;
+        var v = parseFloat(rec.values[f]);
+        if (!isNaN(v) && (maxVal[f] == null || v > maxVal[f])) maxVal[f] = v;
+      });
+    });
+    var problems = [];
+    Object.keys(used).forEach(function (f) {
+      if (!tbl.rows[0].fields[f] || tbl.rows[0].fields[f].disabled) return;   // ช่องปิดข้ามอยู่แล้ว
+      var sm = sgsMax[f];
+      if (sm == null) return;
+      var label = fieldLabel(f);
+      if (parsed.meta && parsed.meta.full && parsed.meta.full[f] != null) {
+        if (parsed.meta.full[f] !== sm) problems.push(label + ': SGS เต็ม ' + sm + ' แต่ e-Score เต็ม ' + parsed.meta.full[f]);
+      } else if (maxVal[f] != null && maxVal[f] > sm) {
+        problems.push(label + ': SGS เต็ม ' + sm + ' แต่คะแนนที่ส่งสูงสุด ' + maxVal[f]);
+      }
+    });
+    return problems;
+  }
+  function fieldLabel(f) { return f === 'Midterm' ? 'กลางภาค' : 'หน่วย ' + f.replace('S', '') + ' (' + f + ')'; }
+
+  /* --------------------------------------------------------------------------
    * detectGroup — หากลุ่มในข้อมูลที่ตรงกับหน้า SGS มากที่สุด (นับเลขประจำตัวที่ตรง)
    * ------------------------------------------------------------------------ */
   function detectGroup(parsed, tbl) {
@@ -181,13 +283,19 @@
   }
 
   // เขียนค่า + จำลอง event ให้ SGS บันทึก (ยิงทั้ง input/change และเรียก onchange ตรง)
+  // ยิง onchange ครั้งเดียว: dispatch 'change' จะเรียก inline handler เอง — เรียกตรงเฉพาะเมื่อ dispatch ไม่ทำงาน
   function setValue(el, val) {
     el.focus();
     el.value = val;
     el.dispatchEvent(new Event('input', { bubbles: true }));
+    var orig = el.onchange, fired = false;
+    if (typeof orig === 'function') {
+      el.onchange = function () { fired = true; return orig.apply(this, arguments); };
+    }
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    if (typeof el.onchange === 'function') {
-      try { el.onchange(); } catch (e) {}
+    if (typeof orig === 'function') {
+      el.onchange = orig;
+      if (!fired) { try { orig.call(el); } catch (e) {} }
     }
     el.blur();
   }
@@ -207,7 +315,12 @@
       matched++;
       if (det && rec.group !== det.group.name) otherGroup++;
     });
-    return { parsed: parsed, tbl: tbl, det: det, onPage: onPage, matched: matched, otherGroup: otherGroup, missing: missing };
+    var ctx = readSgsContext();
+    var sgsMax = tbl.rows.length ? readSgsMax(tbl) : {};
+    var fullProblems = tbl.rows.length ? checkFull(parsed, tbl, sgsMax) : [];
+    var codeMismatch = !!(parsed.meta && parsed.meta.code && ctx.code && parsed.meta.code !== ctx.code);
+    return { parsed: parsed, tbl: tbl, det: det, onPage: onPage, matched: matched, otherGroup: otherGroup, missing: missing,
+             ctx: ctx, sgsMax: sgsMax, fullProblems: fullProblems, codeMismatch: codeMismatch };
   }
 
   /* -------------------------------------------------------------------------- */
@@ -225,9 +338,27 @@
       log(box, '✗ ไม่พบตารางนักเรียน — เลือกวิชา+กลุ่มให้ตารางแสดงก่อน', 'err');
       return;
     }
+    if (a.ctx.subject) log(box, 'หน้า SGS: ' + a.ctx.subject + (a.ctx.section ? ' · กลุ่ม ' + a.ctx.section : ''));
+    if (a.codeMismatch) {
+      log(box, '✗ คนละวิชา! ข้อมูลที่วางเป็น ' + parsed.meta.code + ' แต่หน้า SGS เปิด ' + a.ctx.code + ' — เลือกวิชาให้ตรง หรือคัดลอกข้อมูลวิชานี้จาก e-Score ใหม่', 'err');
+      return;
+    }
+    // หน้าแสดงไม่ครบ → ตั้งจำนวนต่อหน้าให้ แล้วให้กดใหม่หลังโหลด
+    if (ensurePageSize(a.ctx, tbl.rows.length)) {
+      log(box, '⏳ หน้านี้แสดง ' + tbl.rows.length + ' จาก ' + a.ctx.total + ' คน — ตั้งจำนวนต่อหน้าให้แล้ว รอตารางโหลดใหม่ แล้วกด "เติม" อีกครั้ง', 'warn');
+      return;
+    }
     if (tbl.inputCount !== tbl.sidCount) {
-      log(box, '⚠ จำนวนช่องกรอก (' + tbl.inputCount + ') ไม่ตรงกับเลขประจำตัว (' + tbl.sidCount +
-        ') — ตั้งจำนวนต่อหน้าให้เห็นครบทั้งกลุ่ม', 'warn');
+      log(box, '⚠ จำนวนช่องกรอก (' + tbl.inputCount + ') ไม่ตรงกับเลขประจำตัว (' + tbl.sidCount + ')', 'warn');
+    }
+    // คะแนนเต็ม SGS ต้องตรงกับ e-Score ก่อนเติม
+    var fm = FIELDS.filter(function (f) { return a.sgsMax[f] != null && !(tbl.rows[0].fields[f] && tbl.rows[0].fields[f].disabled); })
+      .map(function (f) { return f + '=' + a.sgsMax[f]; }).join(' ');
+    if (fm) log(box, 'คะแนนเต็มใน SGS: ' + fm);
+    if (a.fullProblems.length) {
+      log(box, '✗ คะแนนเต็มใน SGS ไม่ตรงกับ e-Score — แก้คะแนนเต็มใน SGS ให้ตรงก่อน แล้วกดเติมใหม่', 'err');
+      a.fullProblems.forEach(function (m) { log(box, '  • ' + m, 'err'); });
+      return;
     }
 
     // ---- ตรวจกลุ่ม ----
@@ -295,14 +426,17 @@
         if (touched) filledStudents++;
         if (ui && !cfg.dryRun) ui.textContent = 'กำลังเติม… ' + filledStudents + '/' + total;
       }
-    } finally {
+    } catch (e) {
       window.alert = origAlert;
+      throw e;
     }
 
-    // ---- ตรวจค่ากลับหลังเติม (SGS อาจล้างช่องที่คะแนนเกิน) ----
+    // ---- ตรวจค่ากลับหลังเติม — รอ callback ของ SGS (SaveMe → MyCallBack อาจล้างช่องทีหลัง) ----
     var bad = [];
     if (!cfg.dryRun) {
-      await sleep(300);
+      if (ui) ui.textContent = 'รอ SGS บันทึก…';
+      await sleep(1500);
+      window.alert = origAlert;
       done.forEach(function (d) {
         if (String(d.el.value).trim() !== String(d.val).trim()) {
           bad.push(d.sid + ' ' + d.f + ' (ส่ง ' + d.val + ' ได้ "' + d.el.value + '")');
@@ -311,6 +445,7 @@
       });
     }
 
+    window.alert = origAlert;
     log(box, '─────────────', '');
     log(box, (cfg.dryRun ? '[ทดลอง] ' : '✓ ') + 'เติม ' + okCells + ' ช่อง · นักเรียน ' + filledStudents + ' คน',
       cfg.dryRun ? 'warn' : 'ok');
@@ -343,7 +478,7 @@
       '    <b>ขั้นตอน</b><br>',
       '    1. ใน e-Score แท็บบันทึกคะแนน กด <b>"ส่งคะแนนเข้า SGS"</b> (ครั้งเดียวต่อวิชา ได้ทุกกลุ่ม)<br>',
       '    2. วางข้อมูลด้านล่าง — เครื่องมือจะจำไว้ให้<br>',
-      '    3. ใน SGS เลือกวิชา+กลุ่ม ตั้ง <b>"จำนวนต่อหน้า" = 50</b><br>',
+      '    3. ใน SGS เลือกวิชา+กลุ่ม (เครื่องมือตรวจวิชา/คะแนนเต็ม/จำนวนต่อหน้าให้)<br>',
       '    4. ครั้งแรกเปิด <b>"ทดลอง"</b> ดูว่าจับคู่ถูก (ช่องขึ้นสีส้ม) แล้วเอาออก กดอีกครั้งเพื่อบันทึกจริง<br>',
       '    5. เปลี่ยนกลุ่มถัดไปใน SGS → กด "เติม" ซ้ำ (ไม่ต้องวางใหม่)',
       '  </div>',
@@ -384,7 +519,7 @@
       '#kjst-sgs-box .kjst-note{background:#fef9e7;border:1px solid #f1c40f;padding:8px;border-radius:4px;margin-bottom:8px;line-height:1.7}',
       '#kjst-sgs-box .kjst-meta{display:none;background:#eaf2fb;border:1px solid #aed6f1;color:#1a5276;padding:6px 8px;border-radius:4px;margin-bottom:6px;line-height:1.6}',
       '#kjst-sgs-box .kjst-meta.show{display:block}',
-      '#kjst-sgs-box .kjst-status{min-height:16px;margin:4px 0 2px;line-height:1.6;color:#555}',
+      '#kjst-sgs-box .kjst-status{min-height:16px;margin:4px 0 2px;line-height:1.6;color:#555;white-space:pre-line}',
       '#kjst-sgs-box .kjst-status.ok{color:#27ae60;font-weight:bold}#kjst-sgs-box .kjst-status.warn{color:#e67e22}#kjst-sgs-box .kjst-status.err{color:#c0392b}',
       '#kjst-sgs-box textarea{width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;border:1px solid #bbb;border-radius:4px;padding:5px;resize:vertical}',
       '#kjst-sgs-box .kjst-row{margin:6px 0;display:flex;gap:12px;align-items:center;flex-wrap:wrap}',
@@ -435,17 +570,27 @@
       meta.className = 'kjst-meta show';
       meta.textContent = (p.meta ? (p.meta.code + ' ' + p.meta.name + ' · ภาค ' + p.meta.term + ' · ') : 'ข้อมูล (รูปแบบเดิม) · ')
         + (ng > 1 ? ng + ' กลุ่ม · ' : '') + nstu + ' คน · ' + (p.groups[0].header || []).slice(1).join(', ');
+      var ctxLine = a.ctx.subject ? ('SGS: ' + a.ctx.subject + (a.ctx.section ? ' · กลุ่ม ' + a.ctx.section : '') + '\n') : '';
       if (!a.onPage) {
-        status.className = 'kjst-status warn'; status.textContent = 'ยังไม่เห็นตารางนักเรียนบนหน้า SGS — เลือกวิชา+กลุ่มก่อน';
+        status.className = 'kjst-status warn'; status.textContent = ctxLine + 'ยังไม่เห็นตารางนักเรียนบนหน้า SGS — เลือกวิชา+กลุ่มก่อน';
+      } else if (a.codeMismatch) {
+        status.className = 'kjst-status err';
+        status.textContent = ctxLine + '✗ คนละวิชา — ข้อมูลที่วางเป็น ' + p.meta.code;
+      } else if (a.fullProblems.length) {
+        status.className = 'kjst-status err';
+        status.textContent = ctxLine + '✗ คะแนนเต็ม SGS ไม่ตรง e-Score: ' + a.fullProblems.join(' · ') + ' — แก้ใน SGS ก่อน';
+      } else if (a.ctx.total != null && a.onPage < a.ctx.total) {
+        status.className = 'kjst-status warn';
+        status.textContent = ctxLine + '⚠ แสดง ' + a.onPage + ' จาก ' + a.ctx.total + ' คน — กด "เติม" เพื่อตั้งจำนวนต่อหน้าให้ครบ';
       } else if (a.matched === a.onPage) {
         status.className = 'kjst-status ok';
-        status.textContent = '✓ หน้านี้ = ' + (a.det.group.name === '-' ? 'ข้อมูลที่วาง' : a.det.group.name) + ' · ตรง ' + a.matched + '/' + a.onPage + ' คน';
+        status.textContent = ctxLine + '✓ หน้านี้ = ' + (a.det.group.name === '-' ? 'ข้อมูลที่วาง' : a.det.group.name) + ' · ตรง ' + a.matched + '/' + a.onPage + ' คน';
       } else if (a.matched) {
         status.className = 'kjst-status warn';
-        status.textContent = '⚠ หน้านี้ตรงกับ' + (a.det.group.name === '-' ? 'ข้อมูลที่วาง' : a.det.group.name) + ' บางส่วน · ตรง ' + a.matched + '/' + a.onPage + ' คน';
+        status.textContent = ctxLine + '⚠ หน้านี้ตรงกับ' + (a.det.group.name === '-' ? 'ข้อมูลที่วาง' : a.det.group.name) + ' บางส่วน · ตรง ' + a.matched + '/' + a.onPage + ' คน';
       } else {
         status.className = 'kjst-status err';
-        status.textContent = '✗ นักเรียนบนหน้านี้ไม่อยู่ในข้อมูลที่วาง — ตรวจวิชา/กลุ่มใน SGS';
+        status.textContent = ctxLine + '✗ นักเรียนบนหน้านี้ไม่อยู่ในข้อมูลที่วาง — ตรวจวิชา/กลุ่มใน SGS';
       }
       if (save) store(STORE_KEY, { text: text, at: Date.now() });
     }
@@ -464,6 +609,14 @@
     speed.onchange = function () { store(STORE_OPT, { speed: speed.value }); };
 
     ta.addEventListener('input', function () { out.innerHTML = ''; refresh(true); });
+    // ตาราง SGS โหลดใหม่ (เปลี่ยนกลุ่ม/จำนวนต่อหน้า) → อัปเดตสถานะเอง
+    var lastSig = '';
+    setInterval(function () {
+      if (!document.body.contains(wrap)) return;
+      var t = scanTable(), c = readSgsContext();
+      var sig = c.code + '|' + c.section + '|' + t.rows.length + '|' + (t.rows[0] ? t.rows[0].sid : '');
+      if (sig !== lastSig) { lastSig = sig; if (ta.value.trim()) refresh(false); }
+    }, 1500);
     ta.addEventListener('paste', function () { setTimeout(function () { out.innerHTML = ''; refresh(true); }, 0); });
 
     wrap.querySelector('#kjst-min').onclick = function () {
