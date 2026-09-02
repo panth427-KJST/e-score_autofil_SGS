@@ -5,6 +5,11 @@
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  * ใช้กับหน้า SGS: บันทึกผลการเรียน กลางภาค (Edit-TblTranscripts1-Table.aspx)
  *
+ * v3.2 — ลดขั้นตอน:
+ *   - เปิดกล่องแล้วอ่านคลิปบอร์ดเอง: ถ้าเป็นข้อมูลจาก e-Score (ขึ้นต้น #KJST-SGS) และต่างจากที่จำไว้ → ล้างของเดิม วางให้เลย
+ *     (Chrome ถามสิทธิ์อ่านคลิปบอร์ดครั้งแรกครั้งเดียว · ถ้าอ่านอัตโนมัติไม่ได้มีปุ่ม "วางจากคลิปบอร์ด" / Ctrl+V)
+ *   - จำนวนต่อหน้า: ตั้งให้ทันทีที่ตรวจพบว่าแสดงไม่ครบ (ครั้งเดียวต่อวิชา/กลุ่ม) ไม่ต้องกด "เติม" 2 รอบ
+ *
  * v3.1 — ตรวจก่อนเติม:
  *   - อ่านคะแนนเต็มของแต่ละช่องจาก SGS (ฝังใน onchange=CheckValue(...,'S1','15',...)) เทียบกับ
  *     คะแนนเต็มที่ e-Score ส่งมาในบรรทัดหัว (full:...) — ไม่ตรงกัน = ไม่ให้เติม บอกให้แก้ SGS ก่อน
@@ -32,7 +37,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '3.1';
+  var VERSION = '3.2';
   var STORE_KEY = 'kjst_sgs_payload';      // localStorage (โดเมน SGS) จำข้อมูลที่วางล่าสุด
   var STORE_OPT = 'kjst_sgs_opts';         // ตัวเลือก (ความเร็ว)
 
@@ -477,13 +482,15 @@
       '  <div id="kjst-guide" class="kjst-note">',
       '    <b>ขั้นตอน</b><br>',
       '    1. ใน e-Score แท็บบันทึกคะแนน กด <b>"ส่งคะแนนเข้า SGS"</b> (ครั้งเดียวต่อวิชา ได้ทุกกลุ่ม)<br>',
-      '    2. วางข้อมูลด้านล่าง — เครื่องมือจะจำไว้ให้<br>',
-      '    3. ใน SGS เลือกวิชา+กลุ่ม (เครื่องมือตรวจวิชา/คะแนนเต็ม/จำนวนต่อหน้าให้)<br>',
+      '    2. เปิดกล่องนี้ เครื่องมือจะอ่านจากคลิปบอร์ดให้เอง (ครั้งแรก Chrome ถามสิทธิ์ กด "อนุญาต") — หรือวางเอง Ctrl+V<br>',
+      '    3. ใน SGS เลือกวิชา+กลุ่ม (เครื่องมือตรวจวิชา/คะแนนเต็ม และตั้งจำนวนต่อหน้าให้)<br>',
       '    4. ครั้งแรกเปิด <b>"ทดลอง"</b> ดูว่าจับคู่ถูก (ช่องขึ้นสีส้ม) แล้วเอาออก กดอีกครั้งเพื่อบันทึกจริง<br>',
       '    5. เปลี่ยนกลุ่มถัดไปใน SGS → กด "เติม" ซ้ำ (ไม่ต้องวางใหม่)',
       '  </div>',
       '  <div id="kjst-meta" class="kjst-meta"></div>',
-      '  <textarea id="kjst-ta" rows="5" placeholder="วางข้อมูลจาก e-Score ที่นี่ (ปุ่ม &quot;ส่งคะแนนเข้า SGS&quot;)"></textarea>',
+      '  <div class="kjst-row" style="justify-content:space-between;margin:2px 0 4px"><span style="color:#666">ข้อมูลจาก e-Score</span>',
+      '    <button id="kjst-paste" class="kjst-mini" title="อ่านข้อมูลที่คัดลอกไว้จาก e-Score">วางจากคลิปบอร์ด</button></div>',
+      '  <textarea id="kjst-ta" rows="5" placeholder="เปิดกล่องแล้วเครื่องมือจะอ่านจากคลิปบอร์ดให้เอง — หรือวางที่นี่ (Ctrl+V)"></textarea>',
       '  <div id="kjst-status" class="kjst-status"></div>',
       '  <div class="kjst-row"><label>ความเร็ว: <select id="kjst-speed">',
       '    <option value="fast">เร็ว (~15 วิ/30 คน)</option>',
@@ -532,6 +539,8 @@
       '#kjst-clear{flex:0 0 auto;padding:9px 14px;background:#fff;color:#c0392b;border:1.5px solid #e0b4b0;',
       'border-radius:4px;font-size:13px;font-weight:600;cursor:pointer}',
       '#kjst-clear:hover{background:#fdecea}',
+      '#kjst-sgs-box .kjst-mini{padding:4px 10px;background:#eaf2fb;color:#1a5276;border:1px solid #aed6f1;border-radius:4px;font-size:12px;cursor:pointer}',
+      '#kjst-sgs-box .kjst-mini:hover{background:#d4e6f7}',
       '.kjst-out{margin-top:8px;max-height:220px;overflow:auto;background:#f8f9fa;border:1px solid #ddd;',
       'padding:7px;border-radius:4px;line-height:1.7;white-space:pre-wrap}',
       '.kjst-out:empty{display:none}',
@@ -549,6 +558,8 @@
     var out = wrap.querySelector('#kjst-out');
     var speed = wrap.querySelector('#kjst-speed');
     var btn = wrap.querySelector('#kjst-go');
+
+    var autoPaged = {};   // วิชา|กลุ่ม ที่สั่งตั้งจำนวนต่อหน้าไปแล้ว
 
     // ---- สรุปข้อมูลที่วาง + ตรวจกลุ่มบนหน้า (เรียกทุกครั้งที่ข้อมูลเปลี่ยน) ----
     function refresh(save) {
@@ -580,8 +591,16 @@
         status.className = 'kjst-status err';
         status.textContent = ctxLine + '✗ คะแนนเต็ม SGS ไม่ตรง e-Score: ' + a.fullProblems.join(' · ') + ' — แก้ใน SGS ก่อน';
       } else if (a.ctx.total != null && a.onPage < a.ctx.total) {
-        status.className = 'kjst-status warn';
-        status.textContent = ctxLine + '⚠ แสดง ' + a.onPage + ' จาก ' + a.ctx.total + ' คน — กด "เติม" เพื่อตั้งจำนวนต่อหน้าให้ครบ';
+        // แสดงไม่ครบ → ตั้งจำนวนต่อหน้าให้เลย (ครั้งเดียวต่อวิชา/กลุ่ม กันวนซ้ำถ้า SGS ไม่ตอบ)
+        var pk = a.ctx.code + '|' + a.ctx.section;
+        if (!autoPaged[pk] && ensurePageSize(a.ctx, a.onPage)) {
+          autoPaged[pk] = true;
+          status.className = 'kjst-status warn';
+          status.textContent = ctxLine + '⏳ แสดง ' + a.onPage + ' จาก ' + a.ctx.total + ' คน — ตั้งจำนวนต่อหน้าให้แล้ว รอตารางโหลดใหม่…';
+        } else {
+          status.className = 'kjst-status warn';
+          status.textContent = ctxLine + '⚠ แสดง ' + a.onPage + ' จาก ' + a.ctx.total + ' คน — ตั้ง "จำนวนต่อหน้า" ให้ครบก่อน';
+        }
       } else if (a.matched === a.onPage) {
         status.className = 'kjst-status ok';
         status.textContent = ctxLine + '✓ หน้านี้ = ' + (a.det.group.name === '-' ? 'ข้อมูลที่วาง' : a.det.group.name) + ' · ตรง ' + a.matched + '/' + a.onPage + ' คน';
@@ -595,6 +614,36 @@
       if (save) store(STORE_KEY, { text: text, at: Date.now() });
     }
 
+    // ---- อ่านคลิปบอร์ด: รับเฉพาะข้อมูลจาก e-Score (#KJST-SGS) ----
+    // auto=true (ตอนเปิดกล่อง): เงียบถ้าอ่านไม่ได้/ไม่ใช่ข้อมูล · auto=false (กดปุ่ม): รายงานทุกกรณี
+    function tryClipboard(auto) {
+      if (!(navigator.clipboard && navigator.clipboard.readText)) {
+        if (!auto) log(out, 'เบราว์เซอร์นี้ไม่ให้อ่านคลิปบอร์ด — กด Ctrl+V ในกล่องแทน', 'warn');
+        return;
+      }
+      navigator.clipboard.readText().then(function (text) {
+        var t = String(text || '').trim();
+        if (!/^#KJST-SGS/i.test(t)) {
+          if (!auto) log(out, 'คลิปบอร์ดไม่ใช่ข้อมูลจาก e-Score — ไปกด "ส่งคะแนนเข้า SGS" ใน e-Score ก่อน', 'warn');
+          return;
+        }
+        if (t === ta.value.trim()) {
+          if (!auto) log(out, 'คลิปบอร์ดเป็นข้อมูลชุดเดียวกับที่จำไว้', '');
+          return;
+        }
+        ta.value = t;
+        out.innerHTML = '';
+        guide.style.display = 'none';
+        refresh(true);
+        var p = parsePayload(t);
+        var ng = p.groups ? p.groups.length : 0;
+        log(out, '✓ โหลดข้อมูลใหม่จากคลิปบอร์ด: ' + (p.meta ? p.meta.code + ' ' + p.meta.name : '') + (ng > 1 ? ' · ' + ng + ' กลุ่ม' : ''), 'ok');
+      }).catch(function () {
+        if (!auto) log(out, 'อ่านคลิปบอร์ดไม่ได้ (ไม่ได้อนุญาต) — กด Ctrl+V ในกล่องแทน', 'warn');
+      });
+    }
+    wrap.querySelector('#kjst-paste').onclick = function () { tryClipboard(false); };
+
     // ---- โหลดข้อมูลที่จำไว้ ----
     var saved = load(STORE_KEY);
     if (saved && saved.text) {
@@ -604,6 +653,9 @@
       log(out, 'ใช้ข้อมูลที่วางไว้เมื่อ ' + new Date(saved.at).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }) +
         ' — วางใหม่ได้ถ้าคะแนนเปลี่ยน', 'warn');
     }
+    // เปิดกล่อง → ลองอ่านคลิปบอร์ด (ถ้ามีข้อมูลใหม่กว่าจะแทนที่ของที่จำไว้)
+    tryClipboard(true);
+
     var opts = load(STORE_OPT);
     if (opts && opts.speed && SPEED[opts.speed]) speed.value = opts.speed;
     speed.onchange = function () { store(STORE_OPT, { speed: speed.value }); };
