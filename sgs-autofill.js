@@ -5,6 +5,10 @@
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  * ใช้กับหน้า SGS: บันทึกผลการเรียน กลางภาค (Edit-TblTranscripts1-Table.aspx)
  *
+ * v3.4 — กดปุ่ม "บันทึก" ของ SGS ให้หลังเติมทุกรอบ (ค่าเริ่มต้นเปิด):
+ *   - SGS บันทึกทีละช่องผ่าน AJAX อยู่แล้ว แต่ช่วงใช้พร้อมกันมากบางครั้งไม่ติด → หลังเติม+ตรวจค่ากลับแล้ว
+ *     คลิก ctl00_PageContent_TblTranscriptsSaveButton (postback ทั้งฟอร์ม) ให้เอง กันครูลืม
+ *
  * v3.3 — โหมดเติมอัตโนมัติ (ค่าเริ่มต้นเปิด):
  *   - ครูไม่ต้องกดปุ่ม: เมื่อเงื่อนไขครบ (มีข้อมูล · วิชาตรง · ตารางครบ · คะแนนเต็มตรง · พบนักเรียนครบทุกคน ·
  *     มีคอลัมน์ที่ติ๊กไว้และค่าบนหน้ายังไม่เท่ากับ e-Score) → นับถอยหลัง 3 วิ (ยกเลิกได้) → เติม
@@ -43,7 +47,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '3.3';
+  var VERSION = '3.4';
   var STORE_KEY = 'kjst_sgs_payload';      // localStorage (โดเมน SGS) จำข้อมูลที่วางล่าสุด
   var STORE_OPT = 'kjst_sgs_opts';         // ตัวเลือก (ความเร็ว)
 
@@ -281,6 +285,13 @@
     return true;
   }
 
+  /* clickSgsSave — กดปุ่ม "บันทึก" ของ SGS (postback ทั้งฟอร์ม) คืน true ถ้ากดได้ */
+  function clickSgsSave() {
+    var b = document.getElementById('ctl00_PageContent_TblTranscriptsSaveButton');
+    if (!b || b.disabled) return false;
+    try { b.click(); return true; } catch (e) { return false; }
+  }
+
   /* checkFull — เทียบคะแนนเต็ม SGS กับ e-Score (หรือกับค่าสูงสุดที่จะส่ง ถ้าข้อมูลรุ่นเก่าไม่มี full) */
   function checkFull(parsed, tbl, sgsMax) {
     var used = {}, maxVal = {};
@@ -499,6 +510,13 @@
     }
     if (cfg.dryRun) log(box, 'ยังไม่บันทึกจริง — เอาเครื่องหมาย "ทดลอง" ออกแล้วกดอีกครั้ง', 'warn');
     else if (!bad.length && !alerts.length) log(box, cfg.auto ? '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปใน SGS ได้เลย' : '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปใน SGS แล้วกด "เติม" ได้เลย (ข้อมูลจำไว้แล้ว)', 'ok');
+
+    // ---- กดปุ่ม "บันทึก" ของ SGS ให้ (กันกรณีบันทึกอัตโนมัติทีละช่องไม่ติดช่วงคนใช้เยอะ) ----
+    if (!cfg.dryRun && cfg.clickSave && okCells > 0) {
+      if (ui) ui.textContent = 'กดบันทึก SGS…';
+      if (clickSgsSave()) log(box, '💾 กดปุ่ม "บันทึก" ของ SGS ให้แล้ว — รอหน้าโหลดสักครู่', 'ok');
+      else log(box, '⚠ หาปุ่ม "บันทึก" ของ SGS ไม่พบ — กรุณากดบันทึกเอง', 'warn');
+    }
     return { ok: okCells, bad: bad.length + alerts.length };
   }
 
@@ -517,7 +535,7 @@
       '    2. เปิดกล่องนี้ เครื่องมือจะอ่านจากคลิปบอร์ดให้เอง (ครั้งแรก Chrome ถามสิทธิ์ กด "อนุญาต") — หรือวางเอง Ctrl+V<br>',
       '    3. ใน SGS เลือกวิชา+กลุ่ม (เครื่องมือตรวจวิชา/คะแนนเต็ม และตั้งจำนวนต่อหน้าให้)<br>',
       '    4. <b>เติมอัตโนมัติ</b> (เปิดอยู่): เมื่อวิชา/กลุ่ม/คะแนนเต็ม/รายชื่อตรงครบ จะนับถอยหลัง 3 วิ แล้วเติมช่องที่ติ๊กหัวคอลัมน์ไว้ — ติ๊กเพิ่มก็เติมเพิ่ม · กด "ยกเลิก" ได้ระหว่างนับ<br>',
-      '    5. เปลี่ยนกลุ่มถัดไปใน SGS → เติมให้เอง (ไม่ต้องวางใหม่) · ปิด "เติมอัตโนมัติ" ถ้าอยากกดเองหรือใช้ "ทดลอง"',
+      '    5. เติมเสร็จเครื่องมือจะกดปุ่ม "บันทึก" ของ SGS ให้เอง → เปลี่ยนกลุ่มถัดไปได้เลย (ไม่ต้องวางใหม่) · ปิด "เติมอัตโนมัติ" ถ้าอยากกดเองหรือใช้ "ทดลอง"',
       '  </div>',
       '  <div id="kjst-meta" class="kjst-meta"></div>',
       '  <div class="kjst-row" style="justify-content:space-between;margin:2px 0 4px"><span style="color:#666">ข้อมูลจาก e-Score</span>',
@@ -533,6 +551,7 @@
       '    <label><input type="checkbox" id="kjst-auto" checked> <b>เติมอัตโนมัติ</b></label>',
       '    <label><input type="checkbox" id="kjst-dry"> ทดลอง (ไม่บันทึกจริง)</label>',
       '    <label><input type="checkbox" id="kjst-ow" checked> ทับค่าเดิม</label>',
+      '    <label><input type="checkbox" id="kjst-save" checked> กด "บันทึก" ให้หลังเติม</label>',
       '  </div>',
       '  <div id="kjst-count" class="kjst-count"></div>',
       '  <div class="kjst-btnrow">',
@@ -647,7 +666,7 @@
         AUTO.running = true; AUTO.doneKeys[key] = true;
         btn.disabled = true; var o = btn.textContent; btn.textContent = 'กำลังเติม (อัตโนมัติ)…';
         try {
-          await run({ text: ta.value, speed: speed.value, dryRun: false, overwrite: true, auto: true }, out, btn);
+          await run({ text: ta.value, speed: speed.value, dryRun: false, overwrite: true, auto: true, clickSave: saveCb.checked }, out, btn);
         } catch (e) { log(out, '✗ ผิดพลาด: ' + e, 'err'); }
         btn.disabled = false; btn.textContent = o;
         AUTO.running = false;
@@ -720,6 +739,9 @@
     if (opts.speed && SPEED[opts.speed]) speed.value = opts.speed;
     speed.onchange = function () { var o = load(STORE_OPT) || {}; o.speed = speed.value; store(STORE_OPT, o); };
     autoCb.checked = (opts.auto !== false);            // ค่าเริ่มต้น: เปิด
+    var saveCb = wrap.querySelector('#kjst-save');
+    saveCb.checked = (opts.clickSave !== false);       // ค่าเริ่มต้น: เปิด
+    saveCb.onchange = function () { var o = load(STORE_OPT) || {}; o.clickSave = saveCb.checked; store(STORE_OPT, o); };
     if (autoCb.checked) { dryCb.checked = false; dryCb.disabled = true; }
 
     // ---- อ่านคลิปบอร์ด: รับเฉพาะข้อมูลจาก e-Score (#KJST-SGS) ----
@@ -833,7 +855,8 @@
           text: ta.value,
           speed: speed.value,
           dryRun: dryCb.checked && !dryCb.disabled,
-          overwrite: wrap.querySelector('#kjst-ow').checked
+          overwrite: wrap.querySelector('#kjst-ow').checked,
+          clickSave: saveCb.checked
         }, out, btn);
       } catch (e) { log(out, '✗ ผิดพลาด: ' + e, 'err'); }
       btn.disabled = false; btn.textContent = o;
