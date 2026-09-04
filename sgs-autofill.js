@@ -5,6 +5,12 @@
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  * ใช้กับหน้า SGS: บันทึกผลการเรียน กลางภาค (Edit-TblTranscripts1-Table.aspx)
  *
+ * v3.3 — โหมดเติมอัตโนมัติ (ค่าเริ่มต้นเปิด):
+ *   - ครูไม่ต้องกดปุ่ม: เมื่อเงื่อนไขครบ (มีข้อมูล · วิชาตรง · ตารางครบ · คะแนนเต็มตรง · พบนักเรียนครบทุกคน ·
+ *     มีคอลัมน์ที่ติ๊กไว้และค่าบนหน้ายังไม่เท่ากับ e-Score) → นับถอยหลัง 3 วิ (ยกเลิกได้) → เติม
+ *   - checkbox หัวคอลัมน์ของ SGS (Check1..9, CheckM) = สัญญาณอนุญาตต่อคอลัมน์ ติ๊กเพิ่มระหว่างนับ → นับใหม่ 3 วิ
+ *   - กันเติมซ้ำ: เทียบค่าเป็นตัวเลข เท่ากันข้าม · หลังเติมรอบหนึ่งจะไม่เติมซ้ำ กลุ่ม+ชุดคอลัมน์ เดิม (กันวนถ้า SGS ปฏิเสธ)
+ *
  * v3.2 — ลดขั้นตอน:
  *   - เปิดกล่องแล้วอ่านคลิปบอร์ดเอง: ถ้าเป็นข้อมูลจาก e-Score (ขึ้นต้น #KJST-SGS) และต่างจากที่จำไว้ → ล้างของเดิม วางให้เลย
  *     (Chrome ถามสิทธิ์อ่านคลิปบอร์ดครั้งแรกครั้งเดียว · ถ้าอ่านอัตโนมัติไม่ได้มีปุ่ม "วางจากคลิปบอร์ด" / Ctrl+V)
@@ -37,7 +43,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '3.2';
+  var VERSION = '3.3';
   var STORE_KEY = 'kjst_sgs_payload';      // localStorage (โดเมน SGS) จำข้อมูลที่วางล่าสุด
   var STORE_OPT = 'kjst_sgs_opts';         // ตัวเลือก (ความเร็ว)
 
@@ -71,6 +77,37 @@
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function noZero(s) { return String(s).replace(/^0+/, ''); }
   function padSid(s) { s = String(s).replace(/\D/g, ''); while (s.length < 5) s = '0' + s; return s; }
+  // เท่ากันแบบตัวเลข ("15.0" == "15") — ใช้กันเติมซ้ำ
+  function sameVal(a, b) {
+    var x = String(a == null ? '' : a).trim(), y = String(b == null ? '' : b).trim();
+    if (x === y) return true;
+    var nx = parseFloat(x), ny = parseFloat(y);
+    return !isNaN(nx) && !isNaN(ny) && Math.abs(nx - ny) < 1e-9;
+  }
+
+  /* planCells — ช่องที่ "จะเติมจริง": ช่องเปิด + มีค่าใน e-Score + (ทับค่าเดิม หรือช่องว่าง) + ค่าไม่เท่ากับที่จะเติม
+   * คืน { cells:[{row,F,el,val}], skipDisabled, skipFilled, skipSame, fields:{S1:true..}, students } */
+  function planCells(parsed, tbl, overwrite) {
+    var plan = { cells: [], skipDisabled: 0, skipFilled: 0, skipSame: 0, fields: {}, students: 0 };
+    tbl.rows.forEach(function (row) {
+      var rec = parsed.index[row.sid];
+      if (!rec) return;
+      var touched = false;
+      Object.keys(rec.values).forEach(function (F) {
+        var el = row.fields[F];
+        if (!el) return;
+        if (el.disabled) { plan.skipDisabled++; return; }
+        var val = rec.values[F];
+        if (sameVal(el.value, val)) { plan.skipSame++; return; }
+        if (!overwrite && el.value.trim() !== '') { plan.skipFilled++; return; }
+        plan.cells.push({ row: row, F: F, el: el, val: val });
+        plan.fields[F] = true;
+        touched = true;
+      });
+      if (touched) plan.students++;
+    });
+    return plan;
+  }
 
   function log(box, msg, cls) {
     var line = document.createElement('div');
@@ -400,36 +437,29 @@
     if (first.fields.S1 && !first.fields.S1.disabled) { first.fields.S1.focus(); first.fields.S1.blur(); }
 
     var delay = SPEED[cfg.speed] || SPEED.fast;
-    var okCells = 0, skipDisabled = 0, skipFilled = 0, filledStudents = 0, done = [];
-    var total = a.matched;
+    var plan = planCells(parsed, tbl, cfg.overwrite);
+    var okCells = 0, skipDisabled = plan.skipDisabled, skipFilled = plan.skipFilled, skipSame = plan.skipSame;
+    var filledStudents = 0, done = [], lastSid = null;
+    var total = plan.students;
 
     try {
-      for (var i = 0; i < tbl.rows.length; i++) {
-        var row = tbl.rows[i];
-        var rec = parsed.index[row.sid] || parsed.index[padSid(noZero(row.sid))];
-        if (!rec) continue;
-        var touched = false;
-        var keys = Object.keys(rec.values);
-        for (var j = 0; j < keys.length; j++) {
-          var F = keys[j], el = row.fields[F];
-          if (!el) continue;
-          if (el.disabled) { skipDisabled++; continue; }
-          if (!cfg.overwrite && el.value.trim() !== '') { skipFilled++; continue; }
-          var val = rec.values[F];
-          curCell = row.sid + ' ' + F;
-          if (cfg.dryRun) {
-            el.style.outline = '2px solid #e67e22';
-            el.title = 'จะเติม: ' + val;
-          } else {
-            setValue(el, val);
-            el.style.outline = '2px solid #27ae60';
-            done.push({ el: el, val: val, sid: row.sid, f: F });
-          }
-          okCells++; touched = true;
-          if (!cfg.dryRun) await sleep(delay);
+      for (var i = 0; i < plan.cells.length; i++) {
+        var c = plan.cells[i], el = c.el, val = c.val;
+        curCell = c.row.sid + ' ' + c.F;
+        if (cfg.dryRun) {
+          el.style.outline = '2px solid #e67e22';
+          el.title = 'จะเติม: ' + val;
+        } else {
+          setValue(el, val);
+          el.style.outline = '2px solid #27ae60';
+          done.push({ el: el, val: val, sid: c.row.sid, f: c.F });
         }
-        if (touched) filledStudents++;
-        if (ui && !cfg.dryRun) ui.textContent = 'กำลังเติม… ' + filledStudents + '/' + total;
+        okCells++;
+        if (c.row.sid !== lastSid) { lastSid = c.row.sid; filledStudents++; }
+        if (!cfg.dryRun) {
+          if (ui) ui.textContent = 'กำลังเติม… ' + filledStudents + '/' + total;
+          await sleep(delay);
+        }
       }
     } catch (e) {
       window.alert = origAlert;
@@ -452,9 +482,10 @@
 
     window.alert = origAlert;
     log(box, '─────────────', '');
-    log(box, (cfg.dryRun ? '[ทดลอง] ' : '✓ ') + 'เติม ' + okCells + ' ช่อง · นักเรียน ' + filledStudents + ' คน',
+    log(box, (cfg.dryRun ? '[ทดลอง] ' : '✓ ') + 'เติม ' + okCells + ' ช่อง · นักเรียน ' + filledStudents + ' คน' + (cfg.auto ? ' (อัตโนมัติ)' : ''),
       cfg.dryRun ? 'warn' : 'ok');
-    if (skipDisabled) log(box, '· ข้ามช่องปิด (คะแนนเต็ม 0): ' + skipDisabled + ' ช่อง');
+    if (skipSame) log(box, '· เท่าเดิมอยู่แล้ว ข้าม ' + skipSame + ' ช่อง');
+    if (skipDisabled) log(box, '· ข้ามช่องปิด/ยังไม่ติ๊ก: ' + skipDisabled + ' ช่อง');
     if (skipFilled) log(box, '· ข้ามช่องที่มีค่าอยู่แล้ว: ' + skipFilled + ' ช่อง (เปิด "ทับค่าเดิม" ถ้าต้องการ)', 'warn');
     if (a.missing.length) log(box, '✗ นักเรียนบนหน้า SGS ที่ไม่มีในข้อมูล: ' + a.missing.join(', '), 'err');
     if (alerts.length) {
@@ -467,7 +498,8 @@
       log(box, '  ตรวจว่าคะแนนเต็มใน SGS ตรงกับ e-Score หรือไม่', 'warn');
     }
     if (cfg.dryRun) log(box, 'ยังไม่บันทึกจริง — เอาเครื่องหมาย "ทดลอง" ออกแล้วกดอีกครั้ง', 'warn');
-    else if (!bad.length && !alerts.length) log(box, '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปใน SGS แล้วกด "เติม" ได้เลย (ข้อมูลจำไว้แล้ว)', 'ok');
+    else if (!bad.length && !alerts.length) log(box, cfg.auto ? '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปใน SGS ได้เลย' : '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปใน SGS แล้วกด "เติม" ได้เลย (ข้อมูลจำไว้แล้ว)', 'ok');
+    return { ok: okCells, bad: bad.length + alerts.length };
   }
 
   /* -------------------------------------------------------------------------- */
@@ -484,8 +516,8 @@
       '    1. ใน e-Score แท็บบันทึกคะแนน กด <b>"ส่งคะแนนเข้า SGS"</b> (ครั้งเดียวต่อวิชา ได้ทุกกลุ่ม)<br>',
       '    2. เปิดกล่องนี้ เครื่องมือจะอ่านจากคลิปบอร์ดให้เอง (ครั้งแรก Chrome ถามสิทธิ์ กด "อนุญาต") — หรือวางเอง Ctrl+V<br>',
       '    3. ใน SGS เลือกวิชา+กลุ่ม (เครื่องมือตรวจวิชา/คะแนนเต็ม และตั้งจำนวนต่อหน้าให้)<br>',
-      '    4. ครั้งแรกเปิด <b>"ทดลอง"</b> ดูว่าจับคู่ถูก (ช่องขึ้นสีส้ม) แล้วเอาออก กดอีกครั้งเพื่อบันทึกจริง<br>',
-      '    5. เปลี่ยนกลุ่มถัดไปใน SGS → กด "เติม" ซ้ำ (ไม่ต้องวางใหม่)',
+      '    4. <b>เติมอัตโนมัติ</b> (เปิดอยู่): เมื่อวิชา/กลุ่ม/คะแนนเต็ม/รายชื่อตรงครบ จะนับถอยหลัง 3 วิ แล้วเติมช่องที่ติ๊กหัวคอลัมน์ไว้ — ติ๊กเพิ่มก็เติมเพิ่ม · กด "ยกเลิก" ได้ระหว่างนับ<br>',
+      '    5. เปลี่ยนกลุ่มถัดไปใน SGS → เติมให้เอง (ไม่ต้องวางใหม่) · ปิด "เติมอัตโนมัติ" ถ้าอยากกดเองหรือใช้ "ทดลอง"',
       '  </div>',
       '  <div id="kjst-meta" class="kjst-meta"></div>',
       '  <div class="kjst-row" style="justify-content:space-between;margin:2px 0 4px"><span style="color:#666">ข้อมูลจาก e-Score</span>',
@@ -498,9 +530,11 @@
       '    <option value="slow">ช้า (~30 วิ · ปลายภาค server ช้า)</option>',
       '  </select></label></div>',
       '  <div class="kjst-row">',
-      '    <label><input type="checkbox" id="kjst-dry" checked> ทดลอง (ไม่บันทึกจริง)</label>',
+      '    <label><input type="checkbox" id="kjst-auto" checked> <b>เติมอัตโนมัติ</b></label>',
+      '    <label><input type="checkbox" id="kjst-dry"> ทดลอง (ไม่บันทึกจริง)</label>',
       '    <label><input type="checkbox" id="kjst-ow" checked> ทับค่าเดิม</label>',
       '  </div>',
+      '  <div id="kjst-count" class="kjst-count"></div>',
       '  <div class="kjst-btnrow">',
       '    <button id="kjst-go">เติมคะแนนลงตาราง</button>',
       '    <button id="kjst-clear" title="ล้างข้อมูลที่จำไว้ เตรียมวางวิชาใหม่">ล้างข้อมูล</button>',
@@ -533,6 +567,10 @@
       '#kjst-sgs-box select{font-size:12px;padding:2px}',
       '#kjst-sgs-box label{cursor:pointer}',
       '#kjst-sgs-box .kjst-btnrow{display:flex;gap:8px;margin-top:2px}',
+      '#kjst-sgs-box .kjst-count{display:none;align-items:center;justify-content:space-between;gap:8px;background:#fff3cd;border:1px solid #f0c36d;color:#7a5c10;padding:7px 10px;border-radius:4px;margin:4px 0 6px;line-height:1.5}',
+      '#kjst-sgs-box .kjst-count.show{display:flex}',
+      '#kjst-sgs-box .kjst-count b{font-size:15px}',
+      '#kjst-sgs-box .kjst-count button{padding:4px 10px;background:#fff;color:#c0392b;border:1px solid #e0b4b0;border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap}',
       '#kjst-go{flex:1 1 auto;padding:9px;background:#27ae60;color:#fff;border:0;border-radius:4px;',
       'font-size:14px;font-weight:bold;cursor:pointer}',
       '#kjst-go:hover{background:#219150}#kjst-go:disabled{background:#95a5a6;cursor:wait}',
@@ -560,6 +598,67 @@
     var btn = wrap.querySelector('#kjst-go');
 
     var autoPaged = {};   // วิชา|กลุ่ม ที่สั่งตั้งจำนวนต่อหน้าไปแล้ว
+    var autoCb = wrap.querySelector('#kjst-auto'), dryCb = wrap.querySelector('#kjst-dry');
+    var countBox = wrap.querySelector('#kjst-count');
+    var AUTO = { timer: null, key: '', left: 0, doneKeys: {}, cancelKey: '', running: false };
+
+    function autoOn() { return autoCb.checked; }
+    function autoStop() {
+      if (AUTO.timer) { clearInterval(AUTO.timer); AUTO.timer = null; }
+      AUTO.key = ''; countBox.className = 'kjst-count'; countBox.innerHTML = '';
+    }
+    // เงื่อนไขครบ → นับถอยหลัง 3 วิ แล้วเติมเฉพาะช่องที่ต่างจาก e-Score
+    function autoConsider(a) {
+      if (!autoOn() || AUTO.running || a.error) return;
+      if (!a.onPage || a.codeMismatch || a.fullProblems.length) { autoStop(); return; }
+      if (a.ctx.total != null && a.onPage < a.ctx.total) { autoStop(); return; }     // รอตารางครบก่อน
+      if (a.missing.length) {                                                          // ต้องพบทุกคน
+        autoStop();
+        status.className = 'kjst-status err';
+        status.textContent += '\n✗ อัตโนมัติไม่เติม: ' + a.missing.length + ' คนบนหน้านี้ไม่มีในข้อมูล (' + a.missing.slice(0, 5).join(', ') + (a.missing.length > 5 ? ' …' : '') + ') — ตรวจแล้วกด "เติม" เองได้';
+        return;
+      }
+      var plan = planCells(a.parsed, a.tbl, true);
+      var fields = FIELDS.filter(function (f) { return plan.fields[f]; });
+      var key = a.ctx.code + '|' + a.ctx.section + '|' + fields.join(',');
+      // ครูติ๊ก/เอาออกช่องใด ๆ หลังยกเลิก → ถือว่าเริ่มใหม่ได้
+      var mask = FIELDS.map(function (f) { var e = a.tbl.rows[0].fields[f]; return e && !e.disabled ? '1' : '0'; }).join('');
+      if (AUTO.cancelKey && AUTO.cancelMask !== mask) AUTO.cancelKey = '';
+      if (!plan.cells.length) { autoStop(); return; }                                 // ครบแล้ว/ยังไม่ติ๊ก
+      if (AUTO.doneKeys[key]) { autoStop(); return; }                                 // เติม กลุ่ม+ชุดช่อง นี้ไปแล้ว (กันวน)
+      if (AUTO.cancelKey === key) return;                                             // ครูยกเลิกไว้ รอจนติ๊กเปลี่ยน
+      if (AUTO.timer && AUTO.key === key) return;                                     // กำลังนับชุดเดิมอยู่
+      // เริ่ม/รีเซ็ตนับถอยหลัง (ติ๊กเพิ่ม = เริ่มใหม่ 3 วิ)
+      if (AUTO.timer) clearInterval(AUTO.timer);
+      AUTO.key = key; AUTO.left = 3;
+      var label = fields.map(fieldLabel).join(', ');
+      var paint = function () {
+        countBox.className = 'kjst-count show';
+        countBox.innerHTML = '<span>จะเติม <b>' + label + '</b><br>' + plan.students + ' คน · ' + plan.cells.length + ' ช่อง ใน <b>' + AUTO.left + '</b> วิ</span>'
+          + '<button id="kjst-cancel">ยกเลิก</button>';
+        countBox.querySelector('#kjst-cancel').onclick = function () { AUTO.cancelKey = key; AUTO.cancelMask = mask; autoStop(); log(out, 'ยกเลิกการเติมอัตโนมัติ (ติ๊กช่องเพิ่มหรือเปลี่ยนกลุ่มจะเริ่มใหม่ · หรือกด "เติม" เอง)', 'warn'); };
+      };
+      paint();
+      AUTO.timer = setInterval(async function () {
+        AUTO.left--;
+        if (AUTO.left > 0) { paint(); return; }
+        clearInterval(AUTO.timer); AUTO.timer = null;
+        countBox.className = 'kjst-count'; countBox.innerHTML = '';
+        AUTO.running = true; AUTO.doneKeys[key] = true;
+        btn.disabled = true; var o = btn.textContent; btn.textContent = 'กำลังเติม (อัตโนมัติ)…';
+        try {
+          await run({ text: ta.value, speed: speed.value, dryRun: false, overwrite: true, auto: true }, out, btn);
+        } catch (e) { log(out, '✗ ผิดพลาด: ' + e, 'err'); }
+        btn.disabled = false; btn.textContent = o;
+        AUTO.running = false;
+        refresh(false);
+      }, 1000);
+    }
+    autoCb.onchange = function () {
+      if (autoOn()) { dryCb.checked = false; dryCb.disabled = true; if (ta.value.trim()) refresh(false); }
+      else { dryCb.disabled = false; autoStop(); }
+      var o = load(STORE_OPT) || {}; o.auto = autoOn(); store(STORE_OPT, o);
+    };
 
     // ---- สรุปข้อมูลที่วาง + ตรวจกลุ่มบนหน้า (เรียกทุกครั้งที่ข้อมูลเปลี่ยน) ----
     function refresh(save) {
@@ -567,6 +666,7 @@
       if (!text.trim()) {
         meta.className = 'kjst-meta'; meta.textContent = '';
         status.className = 'kjst-status'; status.textContent = '';
+        autoStop();
         return;
       }
       var a = analyze(text);
@@ -611,8 +711,16 @@
         status.className = 'kjst-status err';
         status.textContent = ctxLine + '✗ นักเรียนบนหน้านี้ไม่อยู่ในข้อมูลที่วาง — ตรวจวิชา/กลุ่มใน SGS';
       }
-      if (save) store(STORE_KEY, { text: text, at: Date.now() });
+      if (save) { store(STORE_KEY, { text: text, at: Date.now() }); AUTO.doneKeys = {}; AUTO.cancelKey = ''; }
+      autoConsider(a);
     }
+
+    // ---- ตัวเลือกที่จำไว้ (ต้องมาก่อนโหลดข้อมูล เพราะ refresh จะพิจารณาเติมอัตโนมัติ) ----
+    var opts = load(STORE_OPT) || {};
+    if (opts.speed && SPEED[opts.speed]) speed.value = opts.speed;
+    speed.onchange = function () { var o = load(STORE_OPT) || {}; o.speed = speed.value; store(STORE_OPT, o); };
+    autoCb.checked = (opts.auto !== false);            // ค่าเริ่มต้น: เปิด
+    if (autoCb.checked) { dryCb.checked = false; dryCb.disabled = true; }
 
     // ---- อ่านคลิปบอร์ด: รับเฉพาะข้อมูลจาก e-Score (#KJST-SGS) ----
     // auto=true (ตอนเปิดกล่อง): เงียบถ้าอ่านไม่ได้/ไม่ใช่ข้อมูล · auto=false (กดปุ่ม): รายงานทุกกรณี
@@ -656,9 +764,7 @@
     // เปิดกล่อง → ลองอ่านคลิปบอร์ด (ถ้ามีข้อมูลใหม่กว่าจะแทนที่ของที่จำไว้)
     tryClipboard(true);
 
-    var opts = load(STORE_OPT);
-    if (opts && opts.speed && SPEED[opts.speed]) speed.value = opts.speed;
-    speed.onchange = function () { store(STORE_OPT, { speed: speed.value }); };
+
 
     ta.addEventListener('input', function () { out.innerHTML = ''; refresh(true); });
     // ตาราง SGS โหลดใหม่ (เปลี่ยนกลุ่ม/จำนวนต่อหน้า) → อัปเดตสถานะเอง
@@ -666,9 +772,15 @@
     setInterval(function () {
       if (!document.body.contains(wrap)) return;
       var t = scanTable(), c = readSgsContext();
-      var sig = c.code + '|' + c.section + '|' + t.rows.length + '|' + (t.rows[0] ? t.rows[0].sid : '');
+      var mask = t.rows[0] ? FIELDS.map(function (f) { var e = t.rows[0].fields[f]; return e && !e.disabled ? '1' : '0'; }).join('') : '';
+      var sig = c.code + '|' + c.section + '|' + t.rows.length + '|' + (t.rows[0] ? t.rows[0].sid : '') + '|' + mask;
       if (sig !== lastSig) { lastSig = sig; if (ta.value.trim()) refresh(false); }
     }, 1500);
+    // ติ๊ก/เอาออก checkbox หัวคอลัมน์ของ SGS → พิจารณาทันที (ไม่รอ poll)
+    document.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t && t.id && t.id.indexOf('ctl00_PageContent_Check') === 0 && ta.value.trim()) setTimeout(function () { refresh(false); }, 50);
+    }, true);
     ta.addEventListener('paste', function () { setTimeout(function () { out.innerHTML = ''; refresh(true); }, 0); });
 
     wrap.querySelector('#kjst-min').onclick = function () {
@@ -710,6 +822,7 @@
     })(wrap.querySelector('.kjst-h'), wrap);
 
     btn.onclick = async function () {
+      autoStop();
       btn.disabled = true; var o = btn.textContent; btn.textContent = 'กำลังเติม...';
       // ล้างไฮไลต์รอบก่อน
       document.querySelectorAll('input[id*="TblTranscriptsTableControlRepeater"]').forEach(function (el) {
@@ -719,11 +832,18 @@
         await run({
           text: ta.value,
           speed: speed.value,
-          dryRun: wrap.querySelector('#kjst-dry').checked,
+          dryRun: dryCb.checked && !dryCb.disabled,
           overwrite: wrap.querySelector('#kjst-ow').checked
         }, out, btn);
       } catch (e) { log(out, '✗ ผิดพลาด: ' + e, 'err'); }
       btn.disabled = false; btn.textContent = o;
+      // เติมเองแล้ว → ถือว่า กลุ่ม+ชุดช่อง นี้ทำแล้ว (auto ไม่วนซ้ำช่องที่ SGS ปฏิเสธ)
+      var a2 = analyze(ta.value);
+      if (!a2.error && a2.tbl.rows.length) {
+        var pl = planCells(a2.parsed, a2.tbl, true);
+        AUTO.doneKeys[a2.ctx.code + '|' + a2.ctx.section + '|' + FIELDS.filter(function (f) { return pl.fields[f]; }).join(',')] = true;
+      }
+      refresh(false);
     };
   }
 
