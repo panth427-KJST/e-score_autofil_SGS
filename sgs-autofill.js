@@ -4,6 +4,14 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.1 — บันทึกโดยไม่ให้กล่องหาย + เลือกทั้งหมดก่อนบันทึกบนหน้าประเมิน:
+ *   - ปุ่ม "บันทึก" ของ SGS เป็น image button ที่ส่งฟอร์มเต็มหน้า (WebForm_DoPostBackWithOptions clientSubmit=false)
+ *     → หน้าโหลดใหม่ กล่องหาย · v4.1 ส่งฟอร์มเองผ่าน fetch (ข้อมูลเดียวกัน + ปุ่ม.x/.y) แล้วนำ HTML ที่ server ตอบ
+ *     มาแทนที่ UpdatePanel + ค่า __VIEWSTATE/__EVENTVALIDATION (เหมือน partial postback) → กล่องอยู่ต่อ ผลสรุปที่ SGS
+ *     คำนวณแสดงทันที · ล้มเหลว → ถอยไปกดปุ่มจริง (หน้าโหลดใหม่)
+ *   - หน้า Q/L: SGS บันทึกเฉพาะแถวที่เลือก → ติ๊ก "เลือกทั้งหมด" (ctl00_PageContent_TblTranscriptsQToggleAll / L) ก่อนบันทึกเสมอ
+ *   - ยืนยันแล้ว 16 ก.ย. 2569: SGS สรุปผลประเมินด้วยฐานนิยม เสมอกันเลือกค่ามาก = กติกา e-Score (ไม่ต้องแก้ e-Score)
+ *
  * v4.0 — รองรับ 4 หน้าของ SGS ด้วยข้อมูลชุดเดียว (page profile):
  *   MID   Edit-TblTranscripts1-Table.aspx  บันทึกผลการเรียน กลางภาค   หน่วย1-4 → S1-S4 · กลางภาค → Midterm
  *   FINAL Edit-TblTranscripts2-Table.aspx  บันทึกผลการเรียน ปลายภาค   หลัง1-3 → S10-S12 · ปลายภาค → Final
@@ -25,7 +33,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.0';
+  var VERSION = '4.1';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -66,7 +74,8 @@
       fields: seq('Q', 1, 10).concat(['QGrade']),
       map: { 'Q1': 'Q1', 'Q2': 'Q2', 'Q3': 'Q3', 'Q4': 'Q4', 'Q5': 'Q5', 'Q6': 'Q6', 'Q7': 'Q7', 'Q8': 'Q8' },
       compare: { 'Qสรุป': 'QGrade' },          // SGS คำนวณเอง — เทียบรายงานเท่านั้น
-      checks: {}, save: 'TblTranscriptsQSaveButton', pag: 'TblTranscriptsQPagination', maxFrom: 'const', max: 3, ajax: false, create: 8
+      checks: {}, save: 'TblTranscriptsQSaveButton', pag: 'TblTranscriptsQPagination', maxFrom: 'const', max: 3, ajax: false, create: 8,
+      toggleAll: 'TblTranscriptsQToggleAll'
     },
     {
       id: 'L', name: 'อ่าน คิดวิเคราะห์ เขียน', url: /Edit-TblTranscriptsL-Table\.aspx/i,
@@ -74,7 +83,8 @@
       fields: seq('L', 1, 5).concat(['LGrade']),
       map: { 'L1': 'L1', 'L2': 'L2', 'L3': 'L3', 'L4': 'L4', 'L5': 'L5', 'Lสรุป': 'LGrade' },
       compare: {},
-      checks: {}, save: 'TblTranscriptsLSaveButton', pag: 'TblTranscriptsLPagination', maxFrom: 'const', max: 3, ajax: false, create: 5
+      checks: {}, save: 'TblTranscriptsLSaveButton', pag: 'TblTranscriptsLPagination', maxFrom: 'const', max: 3, ajax: false, create: 5,
+      toggleAll: 'TblTranscriptsLToggleAll'
     }
   ];
   var PAGE = null;
@@ -284,10 +294,59 @@
     try { window.__doPostBack('ctl00$PageContent$' + PAGE.pag + '$_PageSizeButton', ''); } catch (e) { return false; }
     return true;
   }
-  function clickSgsSave() {
+  /* selectAllRows — หน้าประเมิน: SGS บันทึกเฉพาะแถวที่เลือก → ติ๊ก "เลือกทั้งหมด" (คืน true ถ้าติ๊กให้/ติ๊กอยู่แล้ว) */
+  function selectAllRows() {
+    if (!PAGE.toggleAll) return true;
+    var cb = document.getElementById('ctl00_PageContent_' + PAGE.toggleAll);
+    if (!cb) return false;
+    if (!cb.checked) { try { cb.click(); } catch (e) {} }
+    if (!cb.checked) cb.checked = true;
+    // กันกรณี toggleAllCheckboxes ไม่ทำงาน: ติ๊กทุก checkbox เลือกแถวเอง
+    document.querySelectorAll('input[type=checkbox][id*="' + PAGE.repeater + '"][id$="RecordRowSelection"]').forEach(function (x) { x.checked = true; });
+    return true;
+  }
+
+  /* saveViaFetch — ส่งฟอร์มเหมือนกดปุ่ม "บันทึก" แต่ไม่ให้หน้าโหลดใหม่ (กล่องอยู่ต่อ)
+   * ส่ง FormData ของฟอร์มทั้งหมด + <ปุ่ม>.x/.y (ASP.NET รู้ว่า image button ไหนถูกกด) → รับ HTML ทั้งหน้า
+   * → แทนที่ UpdatePanel (หรือทั้งฟอร์ม) + อัปเดต hidden __VIEWSTATE/__EVENTVALIDATION/... เหมือน partial postback
+   * คืน Promise<'fetched'|'clicked'|'none'> */
+  function saveSgs() {
     var b = document.getElementById('ctl00_PageContent_' + PAGE.save);
-    if (!b || b.disabled) return false;
-    try { b.click(); return true; } catch (e) { return false; }
+    if (!b || b.disabled) return Promise.resolve('none');
+    var form = b.form || document.forms[0];
+    var clickFallback = function () { try { b.click(); return 'clicked'; } catch (e) { return 'none'; } };
+    if (!form || typeof window.fetch !== 'function' || typeof FormData === 'undefined') return Promise.resolve(clickFallback());
+    var fd;
+    try {
+      fd = new FormData(form);
+      fd.append(b.name + '.x', '1');
+      fd.append(b.name + '.y', '1');
+    } catch (e) { return Promise.resolve(clickFallback()); }
+    var url = form.getAttribute('action') || location.href;
+    return fetch(url, { method: 'POST', body: fd, credentials: 'same-origin', redirect: 'follow' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(function (html) {
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var nf = doc.forms[0];
+        if (!nf) throw new Error('no form in response');
+        // ต้องมีตารางของหน้านี้ในผลลัพธ์ (ไม่ใช่หน้า login/หน้า error)
+        if (!doc.querySelector('input[id*="' + PAGE.repeater + '"]')) throw new Error('response has no table');
+        // 1) hidden fields ของ ASP.NET
+        nf.querySelectorAll('input[type=hidden]').forEach(function (h) {
+          if (!h.name || h.name.indexOf('__') !== 0) return;
+          var cur = form.querySelector('input[type=hidden][name="' + h.name + '"]');
+          if (cur) cur.value = h.value;
+          else { var c = h.cloneNode(true); form.appendChild(c); }
+        });
+        // 2) เนื้อหา: UpdatePanel ถ้ามีทั้งสองฝั่ง ไม่งั้นทั้งฟอร์ม (กล่องเราอยู่นอกฟอร์ม ไม่หาย)
+        var panelId = null;
+        var pans = form.querySelectorAll('[id$="UpdatePanel1"],[id*="UpdatePanel"]');
+        for (var i = 0; i < pans.length; i++) { if (doc.getElementById(pans[i].id)) { panelId = pans[i].id; break; } }
+        if (panelId) document.getElementById(panelId).innerHTML = doc.getElementById(panelId).innerHTML;
+        else form.innerHTML = nf.innerHTML;
+        return 'fetched';
+      })
+      .catch(function () { return clickFallback(); });
   }
 
   /* แถวที่ใช้ได้: หน้าประเมินกรองรหัสวิชาตามข้อมูล (ตารางอาจมีหลายวิชาเมื่อเลือก "ทั้งหมด") */
@@ -499,10 +558,16 @@
     if (cfg.dryRun) log(box, 'ยังไม่บันทึกจริง — เอาเครื่องหมาย "ทดลอง" ออกแล้วกดอีกครั้ง', 'warn');
     else if (!bad.length && !alerts.length) log(box, '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปได้เลย', 'ok');
 
-    // ---- กดปุ่ม "บันทึก" ของ SGS (หน้าประเมินจำเป็น: ไม่มี AJAX ทีละช่อง) ----
+    // ---- บันทึก: หน้าประเมินต้อง "เลือกทั้งหมด" ก่อน (SGS บันทึกเฉพาะแถวที่เลือก) แล้วส่งฟอร์มแบบไม่โหลดหน้าใหม่ ----
     if (!cfg.dryRun && (cfg.clickSave || !PAGE.ajax) && okCells > 0) {
-      if (ui) ui.textContent = 'กดบันทึก SGS…';
-      if (clickSgsSave()) log(box, '💾 กดปุ่ม "บันทึก" ของ SGS ให้แล้ว — รอหน้าโหลดสักครู่' + (Object.keys(PAGE.compare).length ? ' แล้วดูผลสรุปที่ SGS คำนวณในบรรทัดสถานะ' : ''), 'ok');
+      if (PAGE.toggleAll) {
+        if (selectAllRows()) log(box, '☑ เลือกทั้งหมดให้แล้ว');
+        else log(box, '⚠ หากล่อง "เลือกทั้งหมด" ไม่พบ — SGS อาจไม่บันทึก กรุณาติ๊กเองแล้วกดบันทึก', 'warn');
+      }
+      if (ui) ui.textContent = 'กำลังบันทึก SGS…';
+      var how = await saveSgs();
+      if (how === 'fetched') log(box, '💾 บันทึกใน SGS แล้ว (ไม่ต้องโหลดหน้าใหม่)' + (Object.keys(PAGE.compare).length ? ' — ดูผลสรุปที่ SGS คำนวณในบรรทัดสถานะ' : ''), 'ok');
+      else if (how === 'clicked') log(box, '💾 กดปุ่ม "บันทึก" ของ SGS ให้แล้ว — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อทำกลุ่มต่อไป', 'ok');
       else log(box, '⚠ หาปุ่ม "บันทึก" ของ SGS ไม่พบ — กรุณากดบันทึกเอง', 'warn');
     }
     return { ok: okCells, bad: bad.length + alerts.length };
@@ -523,7 +588,7 @@
       '    2. เปิดกล่องนี้ เครื่องมือจะอ่านจากคลิปบอร์ดให้เอง (ครั้งแรก Chrome ถามสิทธิ์ กด "อนุญาต") — หรือวางเอง Ctrl+V<br>',
       '    3. ใน SGS เลือกวิชา+กลุ่ม (ตรวจวิชา/คะแนนเต็ม/รายชื่อ และตั้งจำนวนต่อหน้าให้)<br>',
       '    4. <b>เติมอัตโนมัติ</b> (เปิดอยู่): ครบเงื่อนไขจะนับ 3 วิ แล้วเติมช่องที่หน้านี้มี — หน้าคะแนนเติมเฉพาะคอลัมน์ที่ติ๊กหัวตาราง<br>',
-      '    5. เติมเสร็จกดปุ่ม "บันทึก" ของ SGS ให้เอง → เปลี่ยนกลุ่ม/เปลี่ยนหน้า (กลางภาค · ปลายภาค · คุณลักษณะ · อ่านคิดฯ) ใช้ข้อมูลชุดเดิมได้',
+      '    5. เติมเสร็จ "เลือกทั้งหมด" (หน้าประเมิน) + บันทึกให้เองโดยไม่โหลดหน้าใหม่ → เปลี่ยนกลุ่ม/เปลี่ยนหน้าได้เลย ใช้ข้อมูลชุดเดิม',
       '  </div>',
       '  <div id="kjst-meta" class="kjst-meta"></div>',
       '  <div class="kjst-row" style="justify-content:space-between;margin:2px 0 4px"><span style="color:#666">ข้อมูลจาก e-Score</span>',
