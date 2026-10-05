@@ -4,6 +4,15 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.2 — หน้า "บันทึก การขาดเรียน" (Edit-TblTranscriptsAttend-Table.aspx · ภาค 15 · 5 ต.ค. 2569):
+ *   - ข้อมูลจาก e-Score ส่วน "เวลาเรียน" (คอลัมน์ เวลาเต็ม · ขาด = ชั่วโมงขาด ครูแก้ หรือ อัตโนมัติ)
+ *   - ทำงานที่กรอบขวา (รายชื่อนักเรียน) เท่านั้น: คลิก "ขาด" + กรอกจำนวนคาบ = e-Score − ยอดที่ SGS มีอยู่แล้ว
+ *     (ยอดเดิมอ่านจากกรอบซ้าย ทุกวัน ทุกสาเหตุ · กรอบซ้ายต้องไม่กรองวันที่) · ขาด 0 / ตรงแล้ว → ข้าม
+ *   - SGS ไม่รับรายการซ้ำ คน+วันเดียวกัน → คนที่มีรายการวันที่เลือกอยู่แล้ว แจ้ง "วันซ้ำ" ให้เปลี่ยนวันแล้วเติมอีกรอบ
+ *   - SGS มากกว่า e-Score → แจ้งให้ครูแก้/ลบในกรอบซ้ายเอง (ไม่ลบให้)
+ *   - ความเร็วเริ่มต้น "ช้า" ~1.2 วิ/คน · กดบันทึกของกรอบขวาแล้วตรวจยอดในกรอบซ้ายซ้ำ
+ *   - ใช้วันที่เดียวลงทั้งหมด (เพื่อให้ร้อยละเวลาเรียนตรง ไม่ได้บันทึกตามวันจริง)
+ *
  * v4.1 — บันทึกโดยไม่ให้กล่องหาย + เลือกทั้งหมดก่อนบันทึกบนหน้าประเมิน:
  *   - ปุ่ม "บันทึก" ของ SGS เป็น image button ที่ส่งฟอร์มเต็มหน้า (WebForm_DoPostBackWithOptions clientSubmit=false)
  *     → หน้าโหลดใหม่ กล่องหาย · v4.1 ส่งฟอร์มเองผ่าน fetch (ข้อมูลเดียวกัน + ปุ่ม.x/.y) แล้วนำ HTML ที่ server ตอบ
@@ -33,7 +42,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.1';
+  var VERSION = '4.2';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -85,6 +94,14 @@
       compare: {},
       checks: {}, save: 'TblTranscriptsLSaveButton', pag: 'TblTranscriptsLPagination', maxFrom: 'const', max: 3, ajax: false, create: 5,
       toggleAll: 'TblTranscriptsLToggleAll'
+    },
+    {
+      // v4.2 ภาค 15 — โค้ดเฉพาะหน้านี้อยู่ส่วน ATT (attAnalyze / attRun)
+      id: 'ATT', name: 'บันทึก การขาดเรียน', url: /Edit-TblTranscriptsAttend-Table\.aspx/i, att: true,
+      repeater: 'View_ClsSubjTeacStdTableControlRepeater', sidMode: 'att',
+      fields: ['RadioButton4', 'TextBoxPeriod'],
+      map: { 'ขาด': 'TextBoxPeriod' }, compare: { 'เวลาเต็ม': 'TextBoxPeriod' },
+      checks: {}, save: 'TblTranscriptsAttendSaveButton1', pag: 'View_ClsSubjTeacStdPagination', maxFrom: 'none', ajax: false
     }
   ];
   var PAGE = null;
@@ -339,9 +356,14 @@
           else { var c = h.cloneNode(true); form.appendChild(c); }
         });
         // 2) เนื้อหา: UpdatePanel ถ้ามีทั้งสองฝั่ง ไม่งั้นทั้งฟอร์ม (กล่องเราอยู่นอกฟอร์ม ไม่หาย)
+        // v4.2: เลือก UpdatePanel ชั้นนอกสุดที่ครอบตารางของหน้านี้ (เดิมหยิบตัวแรกที่ id มีคำว่า UpdatePanel
+        //       ซึ่งอาจเป็น ..._UpdateProgress1 หรือ panel เล็กของช่องวันที่ → ตารางไม่ถูกแทนที่)
         var panelId = null;
-        var pans = form.querySelectorAll('[id$="UpdatePanel1"],[id*="UpdatePanel"]');
-        for (var i = 0; i < pans.length; i++) { if (doc.getElementById(pans[i].id)) { panelId = pans[i].id; break; } }
+        var pans = [].slice.call(form.querySelectorAll('[id*="UpdatePanel"]')).filter(function (el) {
+          return /UpdatePanel\d*$/.test(el.id) && doc.getElementById(el.id) && el.querySelector('[id*="' + PAGE.repeater + '"]');
+        });
+        pans = pans.filter(function (el) { return !pans.some(function (o) { return o !== el && o.contains(el); }); });
+        if (pans.length) panelId = pans[0].id;
         if (panelId) document.getElementById(panelId).innerHTML = doc.getElementById(panelId).innerHTML;
         else form.innerHTML = nf.innerHTML;
         return 'fetched';
@@ -442,6 +464,7 @@
 
   /* analyze — ทุกอย่างที่ต้องรู้ก่อนเติม */
   function analyze(text) {
+    if (PAGE.att) return attAnalyze(text);
     var parsed = parsePayload(text);
     if (parsed.error) return { error: parsed.error };
     var tbl = scanTable();
@@ -465,8 +488,258 @@
              hasFillable: hasFillable, elsewhere: otherPageLabels(parsed) };
   }
 
+  /* ==========================================================================
+   * ATT — หน้า "บันทึก การขาดเรียน" (v4.2 · ภาค 15)
+   *   กรอบซ้าย (อ่านอย่างเดียว): รายการขาดเรียนเดิมของรายวิชา → ยอดเดิมรายคน (รวมทุกวัน ทุกสาเหตุ)
+   *   กรอบขวา (เครื่องมือกรอก): คลิก "ขาด" (RadioButton4) + จำนวนคาบ (TextBoxPeriod) = e-Score − SGS
+   *   SGS ไม่รับรายการซ้ำ คน+วันเดียวกัน → คนที่มีรายการวันที่เลือกอยู่แล้ว = "วันซ้ำ" ให้เปลี่ยนวันแล้วเติมอีกรอบ
+   *   บันทึกด้วยปุ่มบันทึกของกรอบขวา (TblTranscriptsAttendSaveButton1) แล้วตรวจยอดในกรอบซ้ายซ้ำ
+   * ======================================================================== */
+  var ATT = { left: 'TblTranscriptsAttendTableControlRepeater', lpag: 'TblTranscriptsAttendPagination',
+              rpag: 'View_ClsSubjTeacStdPagination', date: 'TextBoxNow1', ldate: 'TextBoxNow',
+              label: 'ขาด', fullLabel: 'เวลาเต็ม',
+              SPEED: { fast: 300, medium: 700, slow: 1200 },          // มิลลิวินาที ต่อ 1 คนที่กรอก
+              pageSize: { TblTranscriptsAttendPagination: 5000, View_ClsSubjTeacStdPagination: 300 } };
+  var attPagingAt = 0;
+  function pcEl(x) { return document.getElementById('ctl00_PageContent_' + x); }
+  function normDate(s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); }
+  function hasDate(s) { s = normDate(s); return !!s && !/โปรดเลือก/.test(s); }
+  function numEq(a, b) { return Math.abs(Number(a) - Number(b)) < 1e-9; }
+  // tr ของแถวนักเรียน + เลขประจำตัว (td ข้อความ 5 หลัก ไม่มีช่องกรอก) — ไต่ขึ้นผ่านตารางซ้อน
+  function sidOfTr(el) {
+    var tr = el.closest ? el.closest('tr') : null;
+    while (tr) {
+      for (var k = 0; k < tr.children.length; k++) {
+        var d = tr.children[k];
+        if (d.tagName === 'TD' && !d.querySelector('input,select,table')) {
+          var t = (d.textContent || '').trim();
+          if (/^\d{5}$/.test(t)) return { tr: tr, sid: t };
+        }
+      }
+      tr = tr.parentElement ? tr.parentElement.closest('tr') : null;
+    }
+    return null;
+  }
+  function attPages(pag) { var t = pcEl(pag + '__TotalPages'); var n = t ? parseInt(t.textContent, 10) : NaN; return isNaN(n) ? null : n; }
+  function attScan() {
+    var right = [], left = [];
+    document.querySelectorAll('input[type=radio][id*="' + PAGE.repeater + '"][id$="_RadioButton4"]').forEach(function (el) {
+      var p = el.id.replace(/_RadioButton4$/, ''), o = sidOfTr(el);
+      if (!o) return;
+      var radios = ['', '1', '2', '3', '4'].map(function (i) { return document.getElementById(p + '_RadioButton' + i); });
+      right.push({ sid: o.sid, tr: o.tr, absent: el, radios: radios, period: document.getElementById(p + '_TextBoxPeriod') });
+    });
+    document.querySelectorAll('input[id*="' + ATT.left + '"][id$="_Period"]').forEach(function (el) {
+      var p = el.id.replace(/_Period$/, ''), o = sidOfTr(el);
+      if (!o) return;
+      var d = document.getElementById(p + '_AttendDate'), sel = document.getElementById(p + '_AttendID');
+      var n = parseFloat(el.value);
+      left.push({ sid: o.sid, date: normDate(d ? d.value : ''), n: isNaN(n) ? 0 : n,
+                  reason: sel && sel.selectedIndex >= 0 ? (sel.options[sel.selectedIndex].text || '').trim() : '' });
+    });
+    return { right: right, left: left };
+  }
+  function attContext() {
+    var c = readSgsContext();                 // code/subject = รายวิชา (กรอบซ้าย) · section = กลุ่ม (กรอบขวา)
+    if (/PLEASE_SELECT/.test(c.section)) c.section = '';
+    var room = pcEl('ClassRoomIDFilter');
+    c.room = (room && room.selectedIndex >= 0 && !/PLEASE_SELECT/.test(room.value)) ? (room.options[room.selectedIndex].text || '').trim() : '';
+    var d = pcEl(ATT.date), ld = pcEl(ATT.ldate);
+    c.date = d ? normDate(d.value) : ''; c.ldate = ld ? normDate(ld.value) : '';
+    c.rPages = attPages(ATT.rpag); c.lPages = attPages(ATT.lpag);
+    return c;
+  }
+  // ตั้งจำนวนต่อหน้าให้แสดงครบ (ทีละกรอบ · ซ้ายก่อน) → 'set:..' | 'wait:..' | 'fail:..' | ''
+  function attEnsurePages(c) {
+    var pag = (c.lPages > 1) ? ATT.lpag : (c.rPages > 1) ? ATT.rpag : null;
+    if (!pag) return '';
+    var what = pag === ATT.lpag ? 'รายการขาดเรียน (กรอบซ้าย)' : 'รายชื่อนักเรียน (กรอบขวา)';
+    if (Date.now() - attPagingAt < 8000) return 'wait:' + what;
+    var ps = pcEl(pag + '__PageSize');
+    if (!ps || typeof window.__doPostBack !== 'function') return 'fail:' + what;
+    if (parseInt(ps.value, 10) >= ATT.pageSize[pag]) return 'fail:' + what;
+    ps.value = String(ATT.pageSize[pag]);
+    try { window.__doPostBack('ctl00$PageContent$' + pag + '$_PageSizeButton', ''); } catch (e) { return 'fail:' + what; }
+    attPagingAt = Date.now();
+    return 'set:' + what;
+  }
+  function attPagesMsg(pm) {
+    var w = pm.replace(/^\w+:/, '');
+    if (/^set:/.test(pm)) return 'ตั้งจำนวนต่อหน้าของ' + w + 'ให้แสดงครบแล้ว รอตารางโหลดใหม่…';
+    if (/^wait:/.test(pm)) return 'รอ' + w + 'โหลดใหม่…';
+    return w + ' แสดงไม่ครบหน้า — ตั้ง "จำนวนต่อหน้า" ให้ครบเองก่อน';
+  }
+  function attList(arr) {
+    return arr.slice(0, 6).map(function (it) { return it.sid + ' (SGS ' + it.s + ' / e-Score ' + it.e + ')'; }).join(', ') + (arr.length > 6 ? ' …' : '');
+  }
+  function attKey(a) {
+    return 'ATT|' + a.ctx.code + '|' + a.ctx.section + '|' + a.ctx.room + '|' + a.ctx.date + '|'
+      + a.fill.map(function (it) { return it.sid + ':' + it.d; }).join(',');
+  }
+
+  /* attAnalyze — แผนการเติมของกรอบขวา
+   *   fill: ต้องเติม (e − s > 0 และยังไม่มีรายการวันที่เลือก) · same/zero: ตรงแล้ว · over: SGS > e-Score (ไม่แตะ)
+   *   conflict: มีรายการวันที่เลือกอยู่แล้ว (SGS ไม่รับวันซ้ำ) · noData: e-Score ไม่มีเวลาเรียน · missing: ไม่มีในข้อมูล
+   *   stray: แถวนอกแผนที่ถูกเลือก/กรอกค้าง (กดบันทึกแล้ว SGS จะบันทึกไปด้วย) · blockers: เงื่อนไขที่ต้องแก้ก่อน */
+  function attAnalyze(text) {
+    var parsed = parsePayload(text);
+    if (parsed.error) return { error: parsed.error };
+    var sc = attScan(), ctx = attContext();
+    var hasLabel = (parsed.labels || []).indexOf(ATT.label) >= 0;
+    var ex = {};
+    sc.left.forEach(function (r) {
+      var e = ex[r.sid] || (ex[r.sid] = { sum: 0, n: 0, dates: {} });
+      e.sum += r.n; e.n++; e.dates[r.date] = (e.dates[r.date] || 0) + r.n;
+    });
+    var a = { att: true, parsed: parsed, sc: sc, ctx: ctx, ex: ex, hasLabel: hasLabel, fill: [], same: 0, zero: 0,
+              over: [], conflict: [], noData: [], missing: [], stray: [], onPage: sc.right.length, matched: 0 };
+    a.codeMismatch = !!(parsed.meta && parsed.meta.code && ctx.code && parsed.meta.code !== ctx.code);
+    a.det = sc.right.length ? detectGroup(parsed, sc.right) : null;
+    sc.right.forEach(function (r) {
+      var dirty = r.radios.some(function (x) { return x && x.checked; }) || !!(r.period && String(r.period.value).trim() !== '');
+      var rec = parsed.index[r.sid];
+      if (!rec) { a.missing.push(r.sid); if (dirty) a.stray.push(r.sid); return; }
+      a.matched++;
+      var raw = rec.values[ATT.label], e = (raw == null || raw === '') ? NaN : Math.round(parseFloat(raw));
+      var s = ex[r.sid] ? Math.round(ex[r.sid].sum * 100) / 100 : 0;
+      var it = { row: r, sid: r.sid, e: e, s: s, d: isNaN(e) ? null : Math.round((e - s) * 100) / 100 };
+      if (isNaN(e)) a.noData.push(r.sid);
+      else if (numEq(it.d, 0)) { if (e === 0) a.zero++; else a.same++; }
+      else if (it.d < 0) a.over.push(it);
+      else if (ex[r.sid] && hasDate(ctx.date) && ex[r.sid].dates[ctx.date] != null) a.conflict.push(it);
+      else { a.fill.push(it); return; }
+      if (dirty) a.stray.push(r.sid);
+    });
+    var b = [];
+    if (!hasLabel) b.push('ข้อมูลที่วางไม่มีคอลัมน์ "ขาด" — ใน e-Score กด "ส่งคะแนนเข้า SGS" แล้วติ๊ก "เวลาเรียน (ขาด)" ด้วย');
+    else if (!ctx.code) b.push('ยังไม่ได้เลือก "รายวิชา" (กรอบซ้าย)');
+    else if (a.codeMismatch) b.push('คนละวิชา! ข้อมูลที่วางเป็น ' + parsed.meta.code + ' แต่ SGS เลือก ' + ctx.code);
+    else if (!sc.right.length) b.push('ยังไม่เห็นรายชื่อนักเรียน — เลือก "กลุ่ม" (หรือห้อง) ในกรอบขวา');
+    else if (!hasDate(ctx.date)) b.push('ยังไม่ได้เลือก "วันที่บันทึก" ในกรอบขวา');
+    else if (hasDate(ctx.ldate)) b.push('"วันที่บันทึก" ในกรอบซ้ายต้องเป็น ** โปรดเลือก ** (ให้เห็นรายการขาดทุกวัน) — ตอนนี้กรองวันที่ ' + ctx.ldate);
+    else if (ctx.lPages > 1 || ctx.rPages > 1) b.push('pages');
+    a.blockers = b;
+    return a;
+  }
+
+  function attStatus(a) {
+    var c = a.ctx;
+    var line = 'SGS: ' + PAGE.name + (c.subject ? ' · ' + c.subject : '') + (c.section ? ' · กลุ่ม ' + c.section : '')
+      + (c.room ? ' · ห้อง ' + c.room : '') + (hasDate(c.date) ? ' · วันที่ ' + c.date : '') + '\n';
+    if (a.blockers.length) {
+      if (a.blockers[0] === 'pages') return { cls: 'warn', text: line + '⏳ ' + attPagesMsg(attEnsurePages(c)) };
+      return { cls: /คนละวิชา|ไม่มีคอลัมน์/.test(a.blockers[0]) ? 'err' : 'warn', text: line + '⚠ ' + a.blockers[0] };
+    }
+    var t = line + 'นักเรียน ' + a.onPage + ' คน · ตรงข้อมูล ' + a.matched + (a.det && a.det.group.name !== '-' ? ' (' + a.det.group.name + ')' : '')
+      + ' · รายการเดิม ' + a.sc.left.length + '\nต้องเติม ' + a.fill.length + ' · ตรงแล้ว ' + a.same + ' · ไม่ขาด ' + a.zero
+      + (a.conflict.length ? ' · วันซ้ำ ' + a.conflict.length : '') + (a.over.length ? ' · SGS เกิน ' + a.over.length : '')
+      + (a.noData.length ? ' · ไม่มีข้อมูล ' + a.noData.length : '');
+    if (a.stray.length) return { cls: 'err', text: t + '\n✗ กรอบขวามีการเลือก/กรอกค้าง ' + a.stray.length + ' แถว (' + a.stray.slice(0, 4).join(', ') + ') — กดปุ่ม Refresh ของกรอบขวาก่อน' };
+    if (a.missing.length) return { cls: 'warn', text: t + '\n⚠ ไม่มีในข้อมูล e-Score ' + a.missing.length + ' คน (' + a.missing.slice(0, 4).join(', ') + (a.missing.length > 4 ? ' …' : '') + ') — อัตโนมัติไม่เติม กด "เติม" เองได้' };
+    var extra = '';
+    if (a.over.length) extra += '\n⚠ SGS มากกว่า e-Score: ' + attList(a.over) + ' — แก้/ลบในกรอบซ้ายเอง';
+    if (a.conflict.length && !a.fill.length) extra += '\n⚠ ที่เหลือมีรายการวันที่ ' + c.date + ' อยู่แล้ว — เปลี่ยน "วันที่บันทึก" เป็นวันอื่น';
+    if (!a.fill.length && !a.conflict.length && !a.over.length) return { cls: 'ok', text: t + '\n✓ ยอดขาดกลุ่มนี้ตรง e-Score แล้ว' };
+    return { cls: (a.over.length || (a.conflict.length && !a.fill.length)) ? 'warn' : 'ok', text: t + extra };
+  }
+
+  function attLogSummary(a, box) {
+    var c = a.ctx;
+    log(box, 'วันที่บันทึก: ' + c.date + ' · รายการขาดเดิมในกรอบซ้าย ' + a.sc.left.length + ' รายการ');
+    log(box, 'แผน: เติม ' + a.fill.length + ' คน · ตรงแล้ว ' + a.same + ' · ไม่ขาด ' + a.zero
+      + (a.noData.length ? ' · ไม่มีข้อมูลเวลาเรียน ' + a.noData.length : ''));
+    if (a.fill.length) log(box, '  ' + a.fill.slice(0, 8).map(function (it) { return it.sid + ' +' + it.d; }).join(', ') + (a.fill.length > 8 ? ' …' : ''));
+    if (a.conflict.length) log(box, '⚠ ' + a.conflict.length + ' คนมีรายการวันที่ ' + c.date + ' อยู่แล้ว (SGS ไม่รับวันซ้ำ): ' + attList(a.conflict)
+      + ' — รอบนี้เสร็จแล้วเปลี่ยน "วันที่บันทึก" เป็นวันอื่น แล้วเติมอีกครั้ง', 'warn');
+    if (a.over.length) log(box, '✗ SGS มีชั่วโมงขาดมากกว่า e-Score ' + a.over.length + ' คน: ' + attList(a.over) + ' — แก้/ลบรายการในกรอบซ้ายเอง (เครื่องมือไม่ลบให้)', 'err');
+    if (a.noData.length) log(box, '· ไม่มีข้อมูลเวลาเรียนใน e-Score (ข้าม): ' + a.noData.slice(0, 8).join(', ') + (a.noData.length > 8 ? ' …' : ''), 'warn');
+  }
+
+  // หลังบันทึก (fetch) — อ่านกรอบซ้ายใหม่ เทียบยอดของคนที่เติม
+  function attVerify(a, box) {
+    var sc = attScan(), c = attContext(), sum = {};
+    if (c.lPages > 1) { log(box, '⚠ กรอบซ้ายแสดงไม่ครบหน้า ตรวจยอดไม่ได้ — กด "เติม" อีกครั้งเพื่อตรวจ', 'warn'); return 0; }
+    sc.left.forEach(function (r) { sum[r.sid] = (sum[r.sid] || 0) + r.n; });
+    var ok = 0, bad = [];
+    a.fill.forEach(function (it) { var s = sum[it.sid] || 0; if (numEq(s, it.e)) ok++; else bad.push(it.sid + ' (SGS ' + s + ' / e-Score ' + it.e + ')'); });
+    if (!bad.length) log(box, '✓ ยอดขาดใน SGS ตรง e-Score ครบ ' + ok + ' คน — เปลี่ยนกลุ่มถัดไปได้เลย', 'ok');
+    else {
+      log(box, '✗ ยอดยังไม่ตรง ' + bad.length + ' คน: ' + bad.slice(0, 8).join(', ') + (bad.length > 8 ? ' …' : ''), 'err');
+      log(box, '  ตรวจในกรอบซ้าย · ถ้ามีรายการวันเดียวกันอยู่แล้ว SGS จะไม่รับ — เปลี่ยนวันที่แล้วกดเติมอีกครั้ง', 'err');
+    }
+    return bad.length;
+  }
+
+  async function attRun(cfg, box, ui) {
+    box.innerHTML = '';
+    var a = attAnalyze(cfg.text);
+    if (a.error) { log(box, '✗ ' + a.error, 'err'); return; }
+    var p = a.parsed, c = a.ctx;
+    if (p.meta) log(box, 'ข้อมูล: ' + p.meta.code + ' ' + p.meta.name + ' · ภาค ' + p.meta.term);
+    log(box, 'หน้า SGS: ' + PAGE.name + (c.subject ? ' · ' + c.subject : '') + (c.section ? ' · กลุ่ม ' + c.section : '') + (c.room ? ' · ห้อง ' + c.room : ''));
+    if (a.blockers.length) {
+      if (a.blockers[0] === 'pages') log(box, '⏳ ' + attPagesMsg(attEnsurePages(c)) + ' แล้วกด "เติม" อีกครั้ง', 'warn');
+      else log(box, '✗ ' + a.blockers[0], 'err');
+      return;
+    }
+    if (a.det) log(box, 'หน้านี้ตรงกับ ' + (a.det.group.name === '-' ? 'ข้อมูลที่วาง' : a.det.group.name) + ' · ตรง ' + a.matched + '/' + a.onPage + ' คน', a.matched === a.onPage ? 'ok' : 'warn');
+    if (a.matched === 0) { log(box, '✗ เลขประจำตัวบนหน้านี้ไม่ตรงกับข้อมูลที่วางเลย — ตรวจวิชา/กลุ่ม', 'err'); return; }
+    if (a.stray.length) {
+      log(box, '✗ กรอบขวามีการเลือก/กรอกค้างที่ไม่อยู่ในแผน ' + a.stray.length + ' แถว (' + a.stray.slice(0, 5).join(', ') + ') — กดปุ่ม Refresh ของกรอบขวาก่อน ไม่งั้น SGS จะบันทึกแถวเหล่านั้นไปด้วย', 'err');
+      return;
+    }
+    if (a.missing.length) {
+      log(box, '⚠ นักเรียนบนหน้า SGS ที่ไม่มีในข้อมูล e-Score (ไม่แตะ): ' + a.missing.join(', '), 'warn');
+      if (cfg.auto) return;
+      if (!cfg.dryRun && !confirm('มี ' + a.missing.length + ' คนบนหน้านี้ที่ไม่มีในข้อมูล e-Score — เติมเฉพาะคนที่ตรงกันต่อหรือไม่?')) { log(box, 'ยกเลิก', 'warn'); return; }
+    }
+    attLogSummary(a, box);
+    var key = attKey(a);
+    if (!a.fill.length) { log(box, a.conflict.length || a.over.length ? '· ไม่มีคนที่เติมได้ในวันที่นี้' : '✓ ยอดขาดกลุ่มนี้ตรง e-Score แล้ว ไม่ต้องเติม', a.conflict.length || a.over.length ? 'warn' : 'ok'); return { ok: 0, bad: 0, key: key }; }
+
+    var delay = ATT.SPEED[cfg.speed] || ATT.SPEED.slow, done = 0;
+    for (var i = 0; i < a.fill.length; i++) {
+      var it = a.fill[i], r = it.row;
+      try { r.tr.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+      if (cfg.dryRun) { r.tr.style.outline = '2px solid #e67e22'; if (r.period) r.period.title = 'จะเติม ขาด ' + it.d + ' คาบ'; }
+      else {
+        try { r.absent.click(); } catch (e) {}
+        r.absent.checked = true;
+        if (r.period) setValue(r.period, String(it.d));
+        r.tr.style.outline = '2px solid #27ae60';
+      }
+      done++;
+      if (ui) ui.textContent = (cfg.dryRun ? 'ทดลอง… ' : 'กำลังกรอก… ') + done + '/' + a.fill.length;
+      if (!cfg.dryRun) await sleep(delay);
+    }
+    log(box, '─────────────', '');
+    if (cfg.dryRun) { log(box, '[ทดลอง] จะเติม ' + done + ' คน (กรอบส้ม) — ยังไม่บันทึก เอา "ทดลอง" ออกแล้วกดอีกครั้ง', 'warn'); return { ok: done, bad: 0 }; }
+    var bad = a.fill.filter(function (x) { return !x.row.absent.checked || !x.row.period || !sameVal(x.row.period.value, x.d); });
+    if (bad.length) {
+      bad.forEach(function (x) { x.row.tr.style.outline = '2px solid #c0392b'; });
+      log(box, '✗ กรอกไม่ติด ' + bad.length + ' แถว (กรอบแดง): ' + bad.slice(0, 5).map(function (x) { return x.sid; }).join(', ') + ' — ไม่กดบันทึก ตรวจแล้วกดเติมใหม่', 'err');
+      return { ok: done - bad.length, bad: bad.length, key: key };
+    }
+    log(box, '✓ กรอก "ขาด" ครบ ' + done + ' คน' + (cfg.auto ? ' (อัตโนมัติ)' : ''), 'ok');
+    if (!cfg.clickSave) { log(box, 'ยังไม่บันทึก — กดปุ่ม "บันทึก" (รูปแผ่นดิสก์) ของกรอบขวาเอง', 'warn'); return { ok: done, bad: 0, key: key }; }
+    if (ui) ui.textContent = 'กำลังบันทึก SGS…';
+    var how = await saveSgs(), nbad = 0;
+    if (how === 'fetched') { log(box, '💾 บันทึกใน SGS แล้ว — ตรวจยอดในกรอบซ้าย…', 'ok'); nbad = attVerify(a, box); }
+    else if (how === 'clicked') log(box, '💾 กดปุ่ม "บันทึก" ให้แล้ว — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อตรวจยอด/ทำกลุ่มต่อไป', 'ok');
+    else log(box, '⚠ หาปุ่ม "บันทึก" ของกรอบขวาไม่พบ — กรุณากดบันทึกเอง', 'warn');
+    if (a.conflict.length) log(box, 'ℹ ยังเหลือ ' + a.conflict.length + ' คนที่ติดวันซ้ำ — เปลี่ยน "วันที่บันทึก" ในกรอบขวาแล้วเติมอีกครั้ง', 'warn');
+    return { ok: done, bad: nbad, key: key };
+  }
+
+  function attSig() {
+    var sc = attScan(), c = attContext(), ls = 0;
+    sc.left.forEach(function (r) { ls += r.n; });
+    return [c.code, c.section, c.room, c.date, c.ldate, c.rPages, c.lPages, sc.right.length, sc.right[0] ? sc.right[0].sid : '', sc.left.length, ls].join('|');
+  }
+
   /* -------------------------------------------------------------------------- */
   async function run(cfg, box, ui) {
+    if (PAGE.att) return attRun(cfg, box, ui);
     box.innerHTML = '';
     var a = analyze(cfg.text);
     if (a.error) { log(box, '✗ ' + a.error, 'err'); return; }
@@ -583,12 +856,22 @@
       '</div>',
       '<div class="kjst-body">',
       '  <div id="kjst-guide" class="kjst-note">',
+      PAGE.att ? [
+      '    <b>ขั้นตอน (บันทึกการขาดเรียน)</b><br>',
+      '    1. ใน e-Score กด <b>"ส่งคะแนนเข้า SGS"</b> ติ๊ก <b>"เวลาเรียน (ขาด)"</b> (ได้ทุกกลุ่มในครั้งเดียว)<br>',
+      '    2. เปิดกล่องนี้ เครื่องมืออ่านจากคลิปบอร์ดให้เอง — หรือวางเอง Ctrl+V<br>',
+      '    3. กรอบซ้าย: เลือก <b>รายวิชา</b> · วันที่บันทึก = ** โปรดเลือก ** (ให้เห็นรายการเดิมทุกวัน)<br>',
+      '    4. กรอบขวา: เลือก <b>กลุ่ม</b> และ <b>วันที่บันทึก</b> (วันเดียวลงทั้งหมด)<br>',
+      '    5. ครบเงื่อนไข → นับ 3 วิ แล้วคลิก "ขาด" + กรอกจำนวนคาบเฉพาะส่วนที่ SGS ยังขาด ช้า ๆ แล้วกดบันทึกให้ + ตรวจยอดซ้ำ<br>',
+      '    6. ถ้ามีคน "วันซ้ำ" (มีรายการวันนั้นอยู่แล้ว) ให้เปลี่ยนวันที่แล้วเติมอีกรอบ → เปลี่ยนกลุ่มต่อได้เลย'
+      ].join('') : [
       '    <b>ขั้นตอน</b><br>',
       '    1. ใน e-Score แท็บบันทึกคะแนน กด <b>"ส่งคะแนนเข้า SGS"</b> ครั้งเดียวต่อวิชา (ได้ทุกกลุ่ม ทุกส่วน รวมผลประเมิน)<br>',
       '    2. เปิดกล่องนี้ เครื่องมือจะอ่านจากคลิปบอร์ดให้เอง (ครั้งแรก Chrome ถามสิทธิ์ กด "อนุญาต") — หรือวางเอง Ctrl+V<br>',
       '    3. ใน SGS เลือกวิชา+กลุ่ม (ตรวจวิชา/คะแนนเต็ม/รายชื่อ และตั้งจำนวนต่อหน้าให้)<br>',
       '    4. <b>เติมอัตโนมัติ</b> (เปิดอยู่): ครบเงื่อนไขจะนับ 3 วิ แล้วเติมช่องที่หน้านี้มี — หน้าคะแนนเติมเฉพาะคอลัมน์ที่ติ๊กหัวตาราง<br>',
-      '    5. เติมเสร็จ "เลือกทั้งหมด" (หน้าประเมิน) + บันทึกให้เองโดยไม่โหลดหน้าใหม่ → เปลี่ยนกลุ่ม/เปลี่ยนหน้าได้เลย ใช้ข้อมูลชุดเดิม',
+      '    5. เติมเสร็จ "เลือกทั้งหมด" (หน้าประเมิน) + บันทึกให้เองโดยไม่โหลดหน้าใหม่ → เปลี่ยนกลุ่ม/เปลี่ยนหน้าได้เลย ใช้ข้อมูลชุดเดิม'
+      ].join(''),
       '  </div>',
       '  <div id="kjst-meta" class="kjst-meta"></div>',
       '  <div class="kjst-row" style="justify-content:space-between;margin:2px 0 4px"><span style="color:#666">ข้อมูลจาก e-Score</span>',
@@ -596,9 +879,10 @@
       '  <textarea id="kjst-ta" rows="4" placeholder="เปิดกล่องแล้วเครื่องมือจะอ่านจากคลิปบอร์ดให้เอง — หรือวางที่นี่ (Ctrl+V)"></textarea>',
       '  <div id="kjst-status" class="kjst-status"></div>',
       '  <div class="kjst-row"><label>ความเร็ว: <select id="kjst-speed">',
+      PAGE.att ? '<option value="fast">เร็ว (~0.3 วิ/คน)</option><option value="medium">ปานกลาง (~0.7 วิ/คน)</option><option value="slow">ช้า (~1.2 วิ/คน · 30–45 วิ/กลุ่ม)</option>' : [
       '    <option value="fast">เร็ว (~15 วิ/30 คน)</option>',
       '    <option value="medium">ปานกลาง (~22 วิ)</option>',
-      '    <option value="slow">ช้า (~30 วิ · ปลายภาค server ช้า)</option>',
+      '    <option value="slow">ช้า (~30 วิ · ปลายภาค server ช้า)</option>'].join(''),
       '  </select></label></div>',
       '  <div class="kjst-row">',
       '    <label><input type="checkbox" id="kjst-auto" checked> <b>เติมอัตโนมัติ</b></label>',
@@ -717,12 +1001,55 @@
       var o = load(STORE_OPT) || {}; o.auto = autoOn(); store(STORE_OPT, o);
     };
 
+    // ---- v4.2 หน้าบันทึกการขาดเรียน ----
+    function attRefreshUI(a, save) {
+      var p = a.parsed, nstu = 0;
+      p.groups.forEach(function (g) { nstu += g.rows.length; });
+      meta.className = 'kjst-meta show';
+      meta.textContent = (p.meta ? p.meta.code + ' ' + p.meta.name + ' · ภาค ' + p.meta.term + ' · ' : 'ข้อมูล · ')
+        + (p.groups.length > 1 ? p.groups.length + ' กลุ่ม · ' : '') + nstu + ' คน · หน้านี้: ' + (a.hasLabel ? 'ขาด (ชม.)' : '—');
+      var st = attStatus(a);
+      status.className = 'kjst-status ' + st.cls; status.textContent = st.text;
+      if (save) { store(STORE_KEY, { text: ta.value, at: Date.now() }); AUTO.doneKeys = {}; AUTO.cancelKey = ''; }
+      attAutoConsider(a);
+    }
+    function attAutoConsider(a) {
+      if (!autoOn() || AUTO.running) return;
+      if (a.blockers.length || a.missing.length || a.stray.length || !a.fill.length || !a.matched) { autoStop(); return; }
+      var key = attKey(a);
+      if (AUTO.doneKeys[key]) { autoStop(); return; }
+      if (AUTO.cancelKey === key) return;
+      if (AUTO.timer && AUTO.key === key) return;
+      if (AUTO.timer) clearInterval(AUTO.timer);
+      AUTO.key = key; AUTO.left = 3;
+      var paint = function () {
+        countBox.className = 'kjst-count show';
+        countBox.innerHTML = '<span>จะเติม <b>ขาด</b> วันที่ ' + a.ctx.date + '<br>' + a.fill.length + ' คน ใน <b>' + AUTO.left + '</b> วิ</span><button id="kjst-cancel">ยกเลิก</button>';
+        countBox.querySelector('#kjst-cancel').onclick = function () { AUTO.cancelKey = key; autoStop(); log(out, 'ยกเลิกการเติมอัตโนมัติ (เปลี่ยนกลุ่ม/วันที่จะเริ่มใหม่ · หรือกด "เติม" เอง)', 'warn'); };
+      };
+      paint();
+      AUTO.timer = setInterval(async function () {
+        AUTO.left--;
+        if (AUTO.left > 0) { paint(); return; }
+        clearInterval(AUTO.timer); AUTO.timer = null;
+        countBox.className = 'kjst-count'; countBox.innerHTML = '';
+        AUTO.running = true; AUTO.doneKeys[key] = true;
+        btn.disabled = true; var o = btn.textContent; btn.textContent = 'กำลังเติม (อัตโนมัติ)…';
+        try { await run({ text: ta.value, speed: speed.value, dryRun: false, auto: true, clickSave: saveCb.checked }, out, btn); }
+        catch (e) { log(out, '✗ ผิดพลาด: ' + e, 'err'); }
+        btn.disabled = false; btn.textContent = o;
+        AUTO.running = false;
+        refresh(false);
+      }, 1000);
+    }
+
     // ---- สถานะ (เรียกทุกครั้งที่ข้อมูล/หน้าเปลี่ยน) ----
     function refresh(save) {
       var text = ta.value;
       if (!text.trim()) { meta.className = 'kjst-meta'; meta.textContent = ''; status.className = 'kjst-status'; status.textContent = ''; autoStop(); return; }
       var a = analyze(text);
       if (a.error) { meta.className = 'kjst-meta'; meta.textContent = ''; status.className = 'kjst-status err'; status.textContent = '✗ ' + a.error; return; }
+      if (PAGE.att) { attRefreshUI(a, save); return; }
       var p = a.parsed, ng = p.groups.length, nstu = 0;
       p.groups.forEach(function (g) { nstu += g.rows.length; });
       var here = (p.labels || []).filter(function (lb) { return mapLabel(lb); });
@@ -771,8 +1098,11 @@
 
     // ---- ตัวเลือกที่จำไว้ ----
     var opts = load(STORE_OPT) || {};
-    if (opts.speed && SPEED[opts.speed]) speed.value = opts.speed;
-    speed.onchange = function () { var o = load(STORE_OPT) || {}; o.speed = speed.value; store(STORE_OPT, o); };
+    var spKey = PAGE.att ? 'attSpeed' : 'speed';               // หน้าขาดเรียนจำความเร็วแยก เริ่มต้น "ช้า"
+    if (opts[spKey] && SPEED[opts[spKey]]) speed.value = opts[spKey];
+    else if (PAGE.att) speed.value = 'slow';
+    speed.onchange = function () { var o = load(STORE_OPT) || {}; o[spKey] = speed.value; store(STORE_OPT, o); };
+    if (PAGE.att) { var owl = wrap.querySelector('#kjst-ow'); if (owl && owl.parentNode) owl.parentNode.style.display = 'none'; }
     autoCb.checked = (opts.auto !== false);
     if (autoCb.checked) { dryCb.checked = false; dryCb.disabled = true; }
     saveCb.checked = (opts.clickSave !== false);
@@ -807,10 +1137,15 @@
     var lastSig = '';
     setInterval(function () {
       if (!document.body.contains(wrap)) return;
-      var t = scanTable(), c = readSgsContext();
-      // รวมค่าช่องที่ SGS คำนวณเอง (QGrade) เพื่อให้สถานะอัปเดตหลังกดบันทึกแม้ตารางหน้าตาเดิม
-      var cmpVals = Object.keys(PAGE.compare).map(function (lb) { var F = PAGE.compare[lb]; return t.rows.map(function (r) { return r.fields[F] ? r.fields[F].value : ''; }).join(','); }).join(';');
-      var sig = c.code + '|' + c.section + '|' + t.rows.length + '|' + (t.rows[0] ? t.rows[0].sid : '') + '|' + maskOf(t.rows) + '|' + cmpVals;
+      if (PAGE.att && AUTO.running) return;      // หน้าขาดเรียน: ไม่รีเฟรชระหว่างกรอก
+      var sig;
+      if (PAGE.att) sig = attSig();
+      else {
+        var t = scanTable(), c = readSgsContext();
+        // รวมค่าช่องที่ SGS คำนวณเอง (QGrade) เพื่อให้สถานะอัปเดตหลังกดบันทึกแม้ตารางหน้าตาเดิม
+        var cmpVals = Object.keys(PAGE.compare).map(function (lb) { var F = PAGE.compare[lb]; return t.rows.map(function (r) { return r.fields[F] ? r.fields[F].value : ''; }).join(','); }).join(';');
+        sig = c.code + '|' + c.section + '|' + t.rows.length + '|' + (t.rows[0] ? t.rows[0].sid : '') + '|' + maskOf(t.rows) + '|' + cmpVals;
+      }
       if (sig !== lastSig) { lastSig = sig; if (ta.value.trim()) refresh(false); }
     }, 1500);
     document.addEventListener('change', function (e) {
@@ -818,12 +1153,16 @@
       if (t && t.id && t.id.indexOf('ctl00_PageContent_Check') === 0 && ta.value.trim()) setTimeout(function () { refresh(false); }, 50);
     }, true);
 
+    function clearMarks() {
+      document.querySelectorAll('input[id*="' + PAGE.repeater + '"]').forEach(function (el) { el.style.outline = ''; el.title = ''; });
+      if (PAGE.att) attScan().right.forEach(function (r) { r.tr.style.outline = ''; });
+    }
     wrap.querySelector('#kjst-min').onclick = function () { body.style.display = body.style.display === 'none' ? 'block' : 'none'; this.textContent = body.style.display === 'none' ? '+' : '–'; };
     wrap.querySelector('#kjst-help').onclick = function () { guide.style.display = guide.style.display === 'none' ? 'block' : 'none'; };
     wrap.querySelector('#kjst-close').onclick = function () { wrap.remove(); if (style.parentNode) style.parentNode.removeChild(style); };
     wrap.querySelector('#kjst-clear').onclick = function () {
       ta.value = ''; out.innerHTML = ''; store(STORE_KEY, null); refresh(false);
-      document.querySelectorAll('input[id*="' + PAGE.repeater + '"]').forEach(function (el) { el.style.outline = ''; el.title = ''; });
+      clearMarks();
       ta.focus();
     };
 
@@ -840,12 +1179,14 @@
     btn.onclick = async function () {
       autoStop();
       btn.disabled = true; var o = btn.textContent; btn.textContent = 'กำลังเติม...';
-      document.querySelectorAll('input[id*="' + PAGE.repeater + '"]').forEach(function (el) { el.style.outline = ''; el.title = ''; });
+      clearMarks();
+      var res = null;
       try {
-        await run({ text: ta.value, speed: speed.value, dryRun: dryCb.checked && !dryCb.disabled,
+        res = await run({ text: ta.value, speed: speed.value, dryRun: dryCb.checked && !dryCb.disabled,
                     overwrite: wrap.querySelector('#kjst-ow').checked, clickSave: saveCb.checked }, out, btn);
       } catch (e) { log(out, '✗ ผิดพลาด: ' + e, 'err'); }
       btn.disabled = false; btn.textContent = o;
+      if (PAGE.att) { if (res && res.key) AUTO.doneKeys[res.key] = true; refresh(false); return; }
       var a2 = analyze(ta.value);
       if (!a2.error && a2.rows.length) {
         var pl = planCells(a2.parsed, a2.rows, true);
