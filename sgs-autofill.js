@@ -4,6 +4,11 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.1 — ผลทดสอบจริง v4.3: คิวอัตโนมัติบันทึกแล้วกล่องหาย (หน้าโหลดใหม่) แต่เติมเอง (ด้วยตัวเอง) กล่องไม่หาย
+ *   - บันทึกเบื้องหลัง (fetch) ส่ง __EVENTTARGET/__EVENTARGUMENT ว่างเสมอ (หลังเปลี่ยนเมนูด้วย async postback ค่านี้อาจค้างชื่อเมนู)
+ *   - โหมดคิว: fetch ล้มเหลว → ไม่กดปุ่มจริง (ไม่โหลดหน้าใหม่) หยุดคิว + แสดงเหตุผล · โหมดด้วยตัวเองยังกดปุ่มจริงแทนเหมือนเดิม แต่บอกเหตุผล
+ *   - บันทึกขั้นตอนคิวใน localStorage kjst_sgs_qtrace → ถ้าหน้าโหลดใหม่กลางคิว คลิก bookmarklet ใหม่จะแสดง 8 ขั้นสุดท้าย
+ *
  * v4.3 — ข้อมูลหลายวิชา + เปลี่ยนวิชา/กลุ่มอัตโนมัติ (ภาค 15 · 6 ต.ค. 2569):
  *   - วางข้อความหลายบล็อกได้ (หน้า admin "คัดลอกทุกวิชาที่แสดง" · แต่ละบล็อกขึ้นต้น #KJST-SGS) → ใช้บล็อกที่ตรงวิชาที่เลือกใน SGS
  *     จับคู่ = รหัสวิชา + ชั้น (หัวข้อมูล grade:Mx ↔ ท้ายชื่อวิชา SGS "ม.x" ซึ่งมีเฉพาะบัญชี admin) · ไม่รู้ชั้นจากชื่อ → เดาจากรหัส (ค21101 = ม.1)
@@ -58,7 +63,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3';
+  var VERSION = '4.3.1';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -478,19 +483,27 @@
     });
   }
 
-  function saveSgs() {
+  // noClick (v4.3 คิว): fetch ล้มเหลว → คืน 'failed:<เหตุผล>' ไม่กดปุ่มจริง (กดจริง = หน้าโหลดใหม่ กล่อง+คิวหาย)
+  var lastSaveError = '';
+  function saveSgs(noClick) {
     var b = document.getElementById('ctl00_PageContent_' + PAGE.save);
     if (!b || b.disabled) return Promise.resolve('none');
     if (PAGE.att) return saveViaIframe(b);                   // v4.2.1 หน้าขาดเรียน
     var form = b.form || document.forms[0];
-    var clickFallback = function () { try { b.click(); return 'clicked'; } catch (e) { return 'none'; } };
-    if (!form || typeof window.fetch !== 'function' || typeof FormData === 'undefined') return Promise.resolve(clickFallback());
+    var clickFallback = function (why) {
+      lastSaveError = String(why || '');
+      if (noClick) return 'failed:' + lastSaveError;
+      try { b.click(); return 'clicked'; } catch (e) { return 'none'; }
+    };
+    if (!form || typeof window.fetch !== 'function' || typeof FormData === 'undefined') return Promise.resolve(clickFallback('เบราว์เซอร์ไม่รองรับ fetch'));
     var fd;
     try {
       fd = new FormData(form);
+      // v4.3: หลัง async postback (เปลี่ยนวิชา/กลุ่ม) __EVENTTARGET อาจค้างชื่อเมนู → server ถือว่าเป็นการเปลี่ยนเมนู ไม่ใช่กดบันทึก
+      fd.set('__EVENTTARGET', ''); fd.set('__EVENTARGUMENT', '');
       fd.append(b.name + '.x', '1');
       fd.append(b.name + '.y', '1');
-    } catch (e) { return Promise.resolve(clickFallback()); }
+    } catch (e) { return Promise.resolve(clickFallback('สร้างข้อมูลฟอร์มไม่ได้: ' + (e && e.message || e))); }
     var url = form.getAttribute('action') || location.href;
     return fetch(url, { method: 'POST', body: fd, credentials: 'same-origin', redirect: 'follow' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
@@ -520,7 +533,7 @@
         else form.innerHTML = nf.innerHTML;
         return 'fetched';
       })
-      .catch(function () { return clickFallback(); });
+      .catch(function (e) { return clickFallback(e && e.message || e); });
   }
 
   /* แถวที่ใช้ได้: หน้าประเมินกรองรหัสวิชาตามข้อมูล (ตารางอาจมีหลายวิชาเมื่อเลือก "ทั้งหมด") */
@@ -996,9 +1009,10 @@
         else log(box, '⚠ หากล่อง "เลือกทั้งหมด" ไม่พบ — SGS อาจไม่บันทึก กรุณาติ๊กเองแล้วกดบันทึก', 'warn');
       }
       if (ui) ui.textContent = 'กำลังบันทึก SGS…';
-      var how = await saveSgs();
-      if (how === 'fetched') log(box, '💾 บันทึกใน SGS แล้ว (ไม่ต้องโหลดหน้าใหม่)' + (Object.keys(PAGE.compare).length ? ' — ดูผลสรุปที่ SGS คำนวณในบรรทัดสถานะ' : ''), 'ok');
-      else if (how === 'clicked') log(box, '💾 กดปุ่ม "บันทึก" ของ SGS ให้แล้ว — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อทำกลุ่มต่อไป', 'ok');
+      var how = await saveSgs(!!cfg.noClick);
+      if (/^failed:/.test(how)) log(box, '✗ บันทึกเบื้องหลังไม่สำเร็จ (' + how.slice(7) + ') — ไม่ได้กดปุ่มจริง (กันหน้าโหลดใหม่) · ค่าที่เติมยังอยู่ในตาราง กด "บันทึก" ของ SGS เองได้', 'err');
+      else if (how === 'fetched') log(box, '💾 บันทึกใน SGS แล้ว (ไม่ต้องโหลดหน้าใหม่)' + (Object.keys(PAGE.compare).length ? ' — ดูผลสรุปที่ SGS คำนวณในบรรทัดสถานะ' : ''), 'ok');
+      else if (how === 'clicked') log(box, '💾 บันทึกเบื้องหลังไม่สำเร็จ (' + lastSaveError + ') จึงกดปุ่ม "บันทึก" ของ SGS ให้ — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อทำกลุ่มต่อไป', 'ok');
       else log(box, '⚠ หาปุ่ม "บันทึก" ของ SGS ไม่พบ — กรุณากดบันทึกเอง', 'warn');
     }
     return { ok: okCells, bad: bad.length + alerts.length, how: how, students: filledStudents };
@@ -1215,6 +1229,13 @@
     // ---- v4.3 คิวเปลี่ยนวิชา/กลุ่มอัตโนมัติ (หน้าคะแนน/ประเมิน · ไม่ใช่หน้าขาดเรียน) ----
     var qBox = wrap.querySelector('#kjst-q'), navSel = wrap.querySelector('#kjst-nav');
     var Q_SUBJ = 'ctl00_PageContent_ClassSubjectIDFilter', Q_SEC = 'ctl00_PageContent_ClassSectionNoFilter';
+    // บันทึกขั้นตอนคิวลง localStorage — ถ้าหน้าโหลดใหม่กลางคิว คลิก bookmarklet ใหม่จะเห็นขั้นสุดท้าย (วินิจฉัย)
+    var Q_TRACE = 'kjst_sgs_qtrace';
+    function qTrace(msg) {
+      var t = load(Q_TRACE) || { running: true, at: Date.now(), steps: [] };
+      t.steps.push(new Date().toLocaleTimeString('th-TH') + ' ' + msg); if (t.steps.length > 40) t.steps = t.steps.slice(-40);
+      store(Q_TRACE, t);
+    }
     function qInAsync() {
       try { return !!(window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager.getInstance().get_isInAsyncPostBack()); } catch (e) { return false; }
     }
@@ -1295,13 +1316,16 @@
       var stopped = { cls: '', st: 'หยุด' };
       var sel = document.getElementById(Q_SUBJ);
       if (!sel) return { cls: 'err', st: 'ไม่พบเมนูรายวิชา', fatal: true };
+      qTrace('เริ่ม ' + it.label);
       if (sel.value !== it.opt.value) {
+        qTrace('เลือกวิชา ' + it.opt.value);
         var r1 = await qPostSelect(Q_SUBJ, it.opt.value);
         if (r1 === 'stop') return stopped;
         if (r1 === 'noopt') return skip('ไม่พบวิชาในเมนู SGS');
         if (r1 !== 'ok') return { cls: 'err', st: 'เลือกวิชาไม่ได้: ' + r1, fatal: true };
       }
       // SGS คงค่ากลุ่มเดิมเมื่อเปลี่ยนวิชา (ตารางอาจเป็นกลุ่มเดิม/ว่าง) → เลือกกลุ่มใหม่ทุกครั้ง
+      qTrace('เลือกกลุ่ม ' + it.sec);
       var r2 = await qPostSelect(Q_SEC, it.sec);
       if (r2 === 'stop') return stopped;
       if (r2 === 'noopt') return skip('SGS ไม่มีกลุ่ม ' + it.sec);
@@ -1309,6 +1333,7 @@
       var a = analyze(ta.value);
       if (!a.error && a.tbl.rows.length && a.ctx.total != null && a.tbl.rows.length < a.ctx.total) {
         var psId = 'ctl00_PageContent_' + PAGE.pag + '__PageSize', ps0 = document.getElementById(psId);
+        qTrace('ตั้งจำนวนต่อหน้า');
         if (!ensurePageSize(a.ctx, a.tbl.rows.length)) return skip('แสดง ' + a.tbl.rows.length + ' จาก ' + a.ctx.total + ' คน ตั้งจำนวนต่อหน้าไม่ได้');
         var r3 = await qWaitReplaced(psId, ps0);
         if (r3 === 'stop') return stopped;
@@ -1327,9 +1352,12 @@
       var plan = planCells(a.parsed, a.rows, true);
       if (!plan.cells.length) return { cls: 'ok', st: '= ตรงแล้ว (' + a.matched + ' คน)' };
       var box = document.createElement('div');
-      var res = await run({ text: ta.value, speed: speed.value, dryRun: dry, overwrite: true, auto: true, clickSave: saveCb.checked }, box, null);
+      qTrace('เติม ' + plan.cells.length + ' ช่อง' + (dry ? ' (ทดลอง)' : '') + ' แล้วบันทึก');
+      var res = await run({ text: ta.value, speed: speed.value, dryRun: dry, overwrite: true, auto: true, clickSave: saveCb.checked, noClick: true }, box, null);
+      qTrace('ผล: ' + (res ? 'ok ' + res.ok + ' bad ' + res.bad + ' how ' + res.how : 'ไม่เติม'));
       if (!res) { var errs = box.querySelectorAll('.err'); return skip(errs.length ? errs[errs.length - 1].textContent.replace(/^✗\s*/, '') : 'ไม่เติม'); }
       if (res.how === 'clicked') return { cls: 'err', st: 'บันทึกแบบโหลดหน้าใหม่ — คลิก bookmarklet แล้วเริ่มคิวต่อ', fatal: true };
+      if (/^failed:/.test(res.how || '')) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่บันทึกเบื้องหลังไม่สำเร็จ (' + res.how.slice(7) + ') — หยุดคิว · กด "บันทึก" ของ SGS เองได้', fatal: true };
       if (res.bad) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง · ผิด ' + res.bad + ' ช่อง (ตรวจในตาราง)' };
       if (dry) return { cls: 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' };
       if (!res.how && !PAGE.ajax) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่ไม่ได้บันทึก (ปิด "กด บันทึก ให้")' };
@@ -1342,6 +1370,7 @@
       var dry = dryCb.checked;
       if (!dry && !confirm('เติม' + (saveCb.checked ? ' + บันทึก' : '') + ' ' + todo.length + ' กลุ่มตามคิว ในหน้า ' + PAGE.name + ' ?\n\nเครื่องมือจะเปลี่ยนวิชา/กลุ่มใน SGS เอง · ไม่ผ่านด่านตรวจ = ข้าม · กด "หยุด" ได้ตลอด\n(ติ๊ก "ทดลอง" เพื่อเดินคิวก่อนได้)')) return;
       Q.running = true; Q.stop = false; autoStop(); btn.disabled = true; out.innerHTML = '';
+      store(Q_TRACE, null); qTrace('เริ่มคิว ' + todo.length + ' กลุ่ม · ' + PAGE.id + (dry ? ' ทดลอง' : ''));
       todo.forEach(function (it) { it.st = 'รอ'; it.cls = ''; });
       qRender();
       var t0 = Date.now(), cnt = { ok: 0, skip: 0, err: 0 };
@@ -1357,6 +1386,7 @@
       }
       todo.forEach(function (x) { if (x.st === 'รอ' || x.st === 'หยุด') { x.st = 'ยังไม่ทำ (หยุด)'; x.cls = 'skip'; } });
       Q.running = false; Q.stop = false; btn.disabled = false;
+      store(Q_TRACE, null);
       var sec = Math.round((Date.now() - t0) / 1000);
       var head = (dry ? '[ทดลอง] ' : '') + 'สรุปคิว ' + PAGE.name + ' · ' + todo.length + ' กลุ่ม · ' + sec + ' วิ — สำเร็จ ' + cnt.ok + ' · ข้าม ' + cnt.skip + ' · ผิดพลาด ' + cnt.err;
       log(out, head, cnt.err ? 'err' : cnt.skip ? 'warn' : 'ok');
@@ -1471,6 +1501,15 @@
     if (saved && saved.text) {
       ta.value = saved.text; guide.style.display = 'none'; refresh(false);
       log(out, 'ใช้ข้อมูลที่วางไว้เมื่อ ' + new Date(saved.at).toLocaleString('th-TH', { dateStyle: 'short', timeStyle: 'short' }) + ' — วางใหม่ได้ถ้าคะแนนเปลี่ยน', 'warn');
+    }
+    if (!PAGE.att) {
+      var qt = load(Q_TRACE);
+      if (qt && qt.steps && Date.now() - qt.at < 6 * 3600 * 1000) {
+        log(out, '⚠ คิวครั้งก่อนจบไม่ปกติ (หน้าโหลดใหม่กลางคิว) — ขั้นตอนล่าสุด:', 'err');
+        qt.steps.slice(-8).forEach(function (m) { log(out, '  ' + m, 'warn'); });
+        log(out, '(ส่งข้อความนี้ให้ผู้ดูแลระบบได้)');
+      }
+      store(Q_TRACE, null);
     }
     tryClipboard(true);
 
