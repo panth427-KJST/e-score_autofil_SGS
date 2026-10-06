@@ -4,6 +4,22 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3 — ข้อมูลหลายวิชา + เปลี่ยนวิชา/กลุ่มอัตโนมัติ (ภาค 15 · 6 ต.ค. 2569):
+ *   - วางข้อความหลายบล็อกได้ (หน้า admin "คัดลอกทุกวิชาที่แสดง" · แต่ละบล็อกขึ้นต้น #KJST-SGS) → ใช้บล็อกที่ตรงวิชาที่เลือกใน SGS
+ *     จับคู่ = รหัสวิชา + ชั้น (หัวข้อมูล grade:Mx ↔ ท้ายชื่อวิชา SGS "ม.x" ซึ่งมีเฉพาะบัญชี admin) · ไม่รู้ชั้นจากชื่อ → เดาจากรหัส (ค21101 = ม.1)
+ *     · ยังกำกวม → ไม่เลือก แจ้งให้เลือกเอง · ข้อมูลไม่มี grade (e-Score รุ่นก่อน) → จับด้วยรหัสอย่างเดียวเหมือนเดิม
+ *   - ตัวเลือก "เปลี่ยนวิชา/กลุ่ม": ด้วยตัวเอง (ค่าเริ่มต้นทุกครั้ง ไม่จำ) / อัตโนมัติ (ตามคิว) — หน้าคะแนน/ประเมินเท่านั้น (ไม่ใช่หน้าขาดเรียน)
+ *     คิว = วิชาในข้อมูลที่มีในเมนู SGS × กลุ่ม · เลือกวิชา → เลือกกลุ่มใหม่ทุกครั้ง (SGS คงค่ากลุ่มเดิมเมื่อเปลี่ยนวิชา)
+ *     → รอตารางโหลด (async postback ของ UpdatePanel1) → ด่านตรวจเดิม → เติม + บันทึก → ถัดไป · ไม่ผ่านด่าน = ข้าม + จดเหตุผล
+ *     · ใช้กับ "ทดลอง" ได้ (dry-run ทั้งคิว) · ปุ่มหยุด · ตารางสรุปท้ายคิว (คัดลอกได้)
+ *
+ * v4.2.1 — หน้าขาดเรียน: บันทึกด้วย "กดปุ่มจริง แต่ส่งผลลัพธ์เข้า iframe ซ่อน" (saveViaIframe) แทน fetch
+ *   - ทดสอบจริง 5 ต.ค. 2569: บันทึกผ่าน fetch ช้าเกิน 1 นาที และกรอบขวาว่างหลังบันทึก ทำงานต่อไม่ได้
+ *     แต่กดบันทึกเองเร็วและรายชื่อยังอยู่ → ให้เบราว์เซอร์ส่งฟอร์มเองแบบเดียวกับกดมือ (onclick/onsubmit/การเข้ารหัสเดิม)
+ *     เพียงตั้ง form.target ไปที่ iframe ซ่อน แล้วย้าย UpdatePanel + ค่า __VIEWSTATE จากผลลัพธ์มาแทน (กล่องไม่หาย)
+ *   - รีเซ็ต submitcount ของ SGS ก่อนกด (SubmitHRefOnce บล็อกการกดครั้งที่ 2 บนหน้าเดิม)
+ *   - ผลลัพธ์ไม่มีรายชื่อกรอบขวา / เกิน 3 นาที → แจ้งให้โหลดหน้าใหม่ · แสดงเวลาที่ใช้บันทึก
+ *
  * v4.2 — หน้า "บันทึก การขาดเรียน" (Edit-TblTranscriptsAttend-Table.aspx · ภาค 15 · 5 ต.ค. 2569):
  *   - ข้อมูลจาก e-Score ส่วน "เวลาเรียน" (คอลัมน์ เวลาเต็ม · ขาด = ชั่วโมงขาด ครูแก้ หรือ อัตโนมัติ)
  *   - ทำงานที่กรอบขวา (รายชื่อนักเรียน) เท่านั้น: คลิก "ขาด" + กรอกจำนวนคาบ = e-Score − ยอดที่ SGS มีอยู่แล้ว
@@ -42,7 +58,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.2';
+  var VERSION = '4.3';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -252,6 +268,84 @@
     return { meta: meta, groups: groups, index: index, unknownCols: Object.keys(unknown), dup: dup, labels: Object.keys(labels) };
   }
 
+  /* --------------------------------------------------------------------------
+   * v4.3 ข้อมูลหลายวิชา — แยกบล็อกตามบรรทัด #KJST-SGS · เลือกบล็อกตามวิชา(+ชั้น) ที่เลือกใน SGS
+   * ------------------------------------------------------------------------ */
+  // ชั้นจากรหัสวิชา: หลักที่ 1 ระดับ (2 = ม.ต้น, 3 = ม.ปลาย) · หลักที่ 2 ปี (0 = ไม่ระบุ)
+  function gradeOfCode(code) {
+    var m = String(code || '').match(/^[ก-๙A-Za-z]+(\d)(\d)/);
+    if (!m || m[2] === '0') return '';
+    var y = parseInt(m[2], 10);
+    if (y < 1 || y > 3) return '';
+    return m[1] === '2' ? 'M' + y : m[1] === '3' ? 'M' + (y + 3) : '';
+  }
+  function gradeOfOptText(t) { var m = String(t || '').match(/ม\.\s*(\d)\s*$/); return m ? 'M' + m[1] : ''; }
+  function gradeTh(g) { return g ? String(g).replace(/^M/, 'ม.') : ''; }
+  var multiMemo = { text: null, val: null };
+  function parseMulti(text) {
+    if (multiMemo.text === text) return multiMemo.val;
+    var lines = String(text || '').replace(/\r/g, '').split('\n'), blocks = [], cur = null;
+    lines.forEach(function (l) {
+      if (/^#KJST-SGS/i.test(l.trim())) { cur = { lines: [] }; blocks.push(cur); }
+      else if (!cur) { cur = { lines: [] }; blocks.push(cur); }
+      cur.lines.push(l);
+    });
+    blocks = blocks.filter(function (b) { return b.lines.join('').trim() !== ''; });
+    var out = blocks.map(function (b) {
+      var t = b.lines.join('\n'), p = parsePayload(t);
+      var gm = (b.lines[0] || '').match(/\tgrade:(M\d)/i);
+      return { text: t, parsed: p, code: p.meta ? p.meta.code : '', name: p.meta ? p.meta.name : '', grade: gm ? gm[1].toUpperCase() : '' };
+    });
+    multiMemo = { text: text, val: out };
+    return out;
+  }
+  // บล็อกที่ตรงวิชา (รหัส + ชั้นท้ายชื่อ option ถ้ามี · รหัสซ้ำหลายชั้นแล้วไม่รู้ชั้น → เดาจากรหัส) → array ผู้สมัคร
+  function matchBlocks(blocks, code, optGrade) {
+    var c = blocks.filter(function (b) { return b.code === code; });
+    if (optGrade) c = c.filter(function (b) { return !b.grade || b.grade === optGrade; });
+    if (c.length > 1) {
+      var g = optGrade || gradeOfCode(code);
+      if (g) c = c.filter(function (b) { return b.grade === g; });
+    }
+    return c;
+  }
+  function parseActive(text) {
+    var blocks = parseMulti(text);
+    if (!blocks.length) return parsePayload(text);
+    var ctx = readSgsContext(), p;
+    if (blocks.length === 1) {
+      p = blocks[0].parsed;
+      if (!p.error && blocks[0].grade && ctx.grade && ctx.code === blocks[0].code && blocks[0].grade !== ctx.grade)
+        return { error: 'คนละชั้น! ข้อมูลที่วางเป็น ' + blocks[0].code + ' ' + gradeTh(blocks[0].grade) + ' แต่ SGS เลือก ' + ctx.subject };
+      return p;
+    }
+    var codes = blocks.map(function (b) { return b.code + (b.grade ? ' ' + gradeTh(b.grade) : ''); });
+    if (!ctx.code) return { error: 'ข้อมูลมี ' + blocks.length + ' วิชา — เลือกรายวิชาใน SGS ก่อน (หรือเลือก "เปลี่ยนวิชา/กลุ่ม: อัตโนมัติ")' };
+    var c = matchBlocks(blocks, ctx.code, ctx.grade);
+    if (!c.length) return { error: 'วิชาที่เลือกใน SGS (' + ctx.subject + ') ไม่อยู่ในข้อมูลที่วาง (' + blocks.length + ' วิชา: ' + codes.slice(0, 6).join(', ') + (codes.length > 6 ? ' …' : '') + ')' };
+    if (c.length > 1) return { error: 'ข้อมูลมี ' + ctx.code + ' หลายชั้น (' + c.map(function (b) { return gradeTh(b.grade) || '?'; }).join(', ') + ') และระบุชั้นจากหน้า SGS ไม่ได้ — คัดลอกจาก e-Score ทีละวิชาแทน' };
+    p = c[0].parsed;
+    if (!p.error) p.multi = { n: blocks.length, grade: c[0].grade };
+    return p;
+  }
+  // option ในเมนูรายวิชาของ SGS ที่ตรงบล็อก (คิวอัตโนมัติ) → { opt } | { error }
+  function findSubjectOption(block) {
+    var sel = document.getElementById('ctl00_PageContent_ClassSubjectIDFilter');
+    if (!sel) return { error: 'ไม่พบเมนูรายวิชา' };
+    var c = [].filter.call(sel.options, function (o) {
+      var m = (o.text || '').trim().match(/^([ก-๙A-Za-z]+\d{4,6})(\s|$)/);
+      return m && m[1] === block.code;
+    });
+    if (block.grade) {
+      // ชั้นท้ายชื่อตรง → ใช้ · ไม่งั้นใช้ตัวที่ไม่บอกชั้น (หน้าครู / ชื่อถูกตัด "ม....") — มีหลายตัวถือว่ากำกวม
+      var exact = c.filter(function (o) { return gradeOfOptText(o.text) === block.grade; });
+      c = exact.length ? exact : c.filter(function (o) { return !gradeOfOptText(o.text); });
+    }
+    if (!c.length) return { error: 'ไม่พบวิชานี้ในเมนู SGS' };
+    if (c.length > 1) return { error: 'เมนู SGS มีวิชานี้ ' + c.length + ' รายการ ระบุชั้นไม่ได้' };
+    return { opt: c[0] };
+  }
+
   function mapLabel(lb) { return PAGE.map[lb] || PAGE.map[String(lb).toLowerCase()] || null; }
   // ป้ายที่มีข้อมูลแต่ไม่ใช่ของหน้านี้ → { ชื่อหน้า: [ป้าย] }
   function otherPageLabels(parsed) {
@@ -288,12 +382,12 @@
   }
 
   function readSgsContext() {
-    var ctx = { code: '', subject: '', section: '', total: null, pageSize: null };
+    var ctx = { code: '', subject: '', grade: '', section: '', total: null, pageSize: null };
     var sel = document.getElementById('ctl00_PageContent_ClassSubjectIDFilter');
     if (sel && sel.selectedIndex >= 0 && sel.value !== '--ANY--') {
       var txt = (sel.options[sel.selectedIndex].text || '').trim();
       var m = txt.match(/^([ก-๙A-Za-z]+\d{4,6})(\s|$)/);
-      if (m) { ctx.code = m[1]; ctx.subject = txt; }              // "ทั้งหมด" → ไม่มีรหัส
+      if (m) { ctx.code = m[1]; ctx.subject = txt; ctx.grade = gradeOfOptText(txt); }   // "ทั้งหมด" → ไม่มีรหัส · grade มีเฉพาะบัญชี admin (v4.3)
     }
     var sec = document.getElementById('ctl00_PageContent_ClassSectionNoFilter');
     if (sec && sec.value !== '--ANY--') ctx.section = sec.value;
@@ -327,9 +421,67 @@
    * ส่ง FormData ของฟอร์มทั้งหมด + <ปุ่ม>.x/.y (ASP.NET รู้ว่า image button ไหนถูกกด) → รับ HTML ทั้งหน้า
    * → แทนที่ UpdatePanel (หรือทั้งฟอร์ม) + อัปเดต hidden __VIEWSTATE/__EVENTVALIDATION/... เหมือน partial postback
    * คืน Promise<'fetched'|'clicked'|'none'> */
+  /* v4.2.1 transplant — ย้ายผลลัพธ์ (เอกสารใหม่ทั้งหน้า) เข้าหน้าปัจจุบัน: hidden __* + UpdatePanel ชั้นนอกที่ครอบตาราง */
+  function transplant(doc, form) {
+    var nf = doc.forms[0];
+    if (!nf) throw new Error('no form in response');
+    if (!doc.querySelector('[id*="' + PAGE.repeater + '"]')) throw new Error('response has no table');
+    nf.querySelectorAll('input[type=hidden]').forEach(function (h) {
+      if (!h.name || h.name.indexOf('__') !== 0) return;
+      var cur = form.querySelector('input[type=hidden][name="' + h.name + '"]');
+      if (cur) cur.value = h.value;
+      else form.appendChild(document.importNode(h, true));
+    });
+    var pans = [].slice.call(form.querySelectorAll('[id*="UpdatePanel"]')).filter(function (el) {
+      return /UpdatePanel\d*$/.test(el.id) && doc.getElementById(el.id) && el.querySelector('[id*="' + PAGE.repeater + '"]');
+    });
+    pans = pans.filter(function (el) { return !pans.some(function (o) { return o !== el && o.contains(el); }); });
+    if (pans.length) pans[0].innerHTML = doc.getElementById(pans[0].id).innerHTML;
+    else form.innerHTML = nf.innerHTML;
+  }
+
+  /* v4.2.1 saveViaIframe — กดปุ่มบันทึกจริง (เบราว์เซอร์ส่งฟอร์มเหมือนกดมือทุกอย่าง) แต่ให้ผลลัพธ์ไปโหลดใน iframe ซ่อน
+   * แล้ว transplant เข้าหน้าปัจจุบัน → คืน Promise<'iframe'|'clicked'|'none'|'timeout'|'error:..'> */
+  function saveViaIframe(b) {
+    return new Promise(function (resolve) {
+      var form = b.form || document.forms[0];
+      if (!form) { resolve('none'); return; }
+      var name = 'kjst_save_' + Date.now();
+      var ifr = document.createElement('iframe');
+      ifr.name = name; ifr.setAttribute('name', name);
+      ifr.style.cssText = 'position:absolute;width:1px;height:1px;left:-9999px;top:-9999px;border:0';
+      ifr.setAttribute('sandbox', 'allow-same-origin');        // ไม่รันสคริปต์ของหน้าผลลัพธ์ (เร็ว + กันสคริปต์ไปยุ่งหน้าหลัก) แต่ยังอ่าน DOM ได้
+      document.body.appendChild(ifr);
+      var oldTarget = form.getAttribute('target'), finished = false, armed = false;
+      var finish = function (r) {
+        if (finished) return; finished = true;
+        clearTimeout(timer);
+        if (oldTarget == null) form.removeAttribute('target'); else form.setAttribute('target', oldTarget);
+        setTimeout(function () { if (ifr.parentNode) ifr.parentNode.removeChild(ifr); }, 500);
+        resolve(r);
+      };
+      var timer = setTimeout(function () { finish('timeout'); }, 180000);
+      ifr.addEventListener('load', function () {
+        if (!armed) return;                                   // about:blank ตอนสร้าง
+        var doc;
+        try { doc = ifr.contentDocument || ifr.contentWindow.document; } catch (e) { finish('error:อ่านผลลัพธ์ไม่ได้'); return; }
+        if (!doc || !doc.forms || !doc.forms.length) return;   // about:blank ไม่มีฟอร์ม → รอ load ถัดไป
+        try { transplant(doc, form); finish('iframe'); }
+        catch (e) { finish('error:' + (e && e.message || e)); }
+      });
+      setTimeout(function () {
+        armed = true;
+        form.setAttribute('target', name);
+        try { window.submitcount = 0; } catch (e) {}        // SubmitHRefOnce ของ SGS กันกดซ้ำบนหน้าเดิม
+        try { b.click(); } catch (e) { finish('error:' + (e && e.message || e)); }
+      }, 30);
+    });
+  }
+
   function saveSgs() {
     var b = document.getElementById('ctl00_PageContent_' + PAGE.save);
     if (!b || b.disabled) return Promise.resolve('none');
+    if (PAGE.att) return saveViaIframe(b);                   // v4.2.1 หน้าขาดเรียน
     var form = b.form || document.forms[0];
     var clickFallback = function () { try { b.click(); return 'clicked'; } catch (e) { return 'none'; } };
     if (!form || typeof window.fetch !== 'function' || typeof FormData === 'undefined') return Promise.resolve(clickFallback());
@@ -465,7 +617,7 @@
   /* analyze — ทุกอย่างที่ต้องรู้ก่อนเติม */
   function analyze(text) {
     if (PAGE.att) return attAnalyze(text);
-    var parsed = parsePayload(text);
+    var parsed = parseActive(text);
     if (parsed.error) return { error: parsed.error };
     var tbl = scanTable();
     var rows = usableRows(parsed, tbl);
@@ -582,7 +734,7 @@
    *   conflict: มีรายการวันที่เลือกอยู่แล้ว (SGS ไม่รับวันซ้ำ) · noData: e-Score ไม่มีเวลาเรียน · missing: ไม่มีในข้อมูล
    *   stray: แถวนอกแผนที่ถูกเลือก/กรอกค้าง (กดบันทึกแล้ว SGS จะบันทึกไปด้วย) · blockers: เงื่อนไขที่ต้องแก้ก่อน */
   function attAnalyze(text) {
-    var parsed = parsePayload(text);
+    var parsed = parseActive(text);
     if (parsed.error) return { error: parsed.error };
     var sc = attScan(), ctx = attContext();
     var hasLabel = (parsed.labels || []).indexOf(ATT.label) >= 0;
@@ -723,9 +875,15 @@
     log(box, '✓ กรอก "ขาด" ครบ ' + done + ' คน' + (cfg.auto ? ' (อัตโนมัติ)' : ''), 'ok');
     if (!cfg.clickSave) { log(box, 'ยังไม่บันทึก — กดปุ่ม "บันทึก" (รูปแผ่นดิสก์) ของกรอบขวาเอง', 'warn'); return { ok: done, bad: 0, key: key }; }
     if (ui) ui.textContent = 'กำลังบันทึก SGS…';
-    var how = await saveSgs(), nbad = 0;
-    if (how === 'fetched') { log(box, '💾 บันทึกใน SGS แล้ว — ตรวจยอดในกรอบซ้าย…', 'ok'); nbad = attVerify(a, box); }
+    var t0 = Date.now(), how = await saveSgs(), nbad = 0, secs = Math.round((Date.now() - t0) / 100) / 10;
+    if (how === 'iframe' || how === 'fetched') {
+      log(box, '💾 บันทึกใน SGS แล้ว (' + secs + ' วิ) — ตรวจยอดในกรอบซ้าย…', 'ok');
+      nbad = attVerify(a, box);
+      if (!attScan().right.length) log(box, '⚠ หลังบันทึกกรอบขวาไม่มีรายชื่อ — กด F5 โหลดหน้าใหม่ แล้วคลิก bookmarklet อีกครั้ง', 'warn');
+    }
     else if (how === 'clicked') log(box, '💾 กดปุ่ม "บันทึก" ให้แล้ว — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อตรวจยอด/ทำกลุ่มต่อไป', 'ok');
+    else if (how === 'timeout') log(box, '⚠ SGS ไม่ตอบภายใน 3 นาที — ตรวจกรอบซ้ายเอง (กด F5 แล้วคลิก bookmarklet ใหม่)', 'err');
+    else if (/^error:/.test(how)) log(box, '⚠ บันทึกแล้วแต่นำผลมาแสดงไม่ได้ (' + how.slice(6) + ') — กด F5 แล้วคลิก bookmarklet ใหม่เพื่อตรวจยอด', 'err');
     else log(box, '⚠ หาปุ่ม "บันทึก" ของกรอบขวาไม่พบ — กรุณากดบันทึกเอง', 'warn');
     if (a.conflict.length) log(box, 'ℹ ยังเหลือ ' + a.conflict.length + ' คนที่ติดวันซ้ำ — เปลี่ยน "วันที่บันทึก" ในกรอบขวาแล้วเติมอีกครั้ง', 'warn');
     return { ok: done, bad: nbad, key: key };
@@ -843,7 +1001,7 @@
       else if (how === 'clicked') log(box, '💾 กดปุ่ม "บันทึก" ของ SGS ให้แล้ว — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อทำกลุ่มต่อไป', 'ok');
       else log(box, '⚠ หาปุ่ม "บันทึก" ของ SGS ไม่พบ — กรุณากดบันทึกเอง', 'warn');
     }
-    return { ok: okCells, bad: bad.length + alerts.length };
+    return { ok: okCells, bad: bad.length + alerts.length, how: how, students: filledStudents };
   }
 
   /* -------------------------------------------------------------------------- */
@@ -890,6 +1048,8 @@
       '    <label><input type="checkbox" id="kjst-ow" checked> ทับค่าเดิม</label>',
       '    <label><input type="checkbox" id="kjst-save" checked> กด "บันทึก" ให้หลังเติม</label>',
       '  </div>',
+      PAGE.att ? '' : '  <div class="kjst-row" id="kjst-navrow"><label>เปลี่ยนวิชา/กลุ่ม: <select id="kjst-nav"><option value="manual" selected>ด้วยตัวเอง</option><option value="auto">อัตโนมัติ (ตามคิว)</option></select></label></div>',
+      PAGE.att ? '' : '  <div id="kjst-q" class="kjst-q"></div>',
       '  <div id="kjst-count" class="kjst-count"></div>',
       '  <div class="kjst-btnrow">',
       '    <button id="kjst-go">เติมลงตาราง</button>',
@@ -933,7 +1093,14 @@
       '.kjst-out{margin-top:8px;max-height:220px;overflow:auto;background:#f8f9fa;border:1px solid #ddd;padding:7px;border-radius:4px;line-height:1.7;white-space:pre-wrap}',
       '.kjst-out:empty{display:none}',
       '.kjst-out .ok{color:#27ae60;font-weight:bold}.kjst-out .err{color:#c0392b;font-weight:bold}.kjst-out .warn{color:#e67e22}',
-      '.kjst-ver{text-align:right;color:#aaa;font-size:10px;margin-top:6px;padding-bottom:2px}'
+      '.kjst-ver{text-align:right;color:#aaa;font-size:10px;margin-top:6px;padding-bottom:2px}',
+      '#kjst-sgs-box .kjst-q{display:none;border:1px solid #aed6f1;background:#f4f9fd;border-radius:4px;padding:6px 8px;margin:4px 0 6px}',
+      '#kjst-sgs-box .kjst-q.show{display:block}',
+      '#kjst-sgs-box .kjst-ql{max-height:180px;overflow:auto;margin:4px 0;line-height:1.6;border-top:1px solid #d6e9f8;padding-top:3px}',
+      '#kjst-sgs-box .kjst-ql label{display:flex;gap:5px;align-items:flex-start}',
+      '#kjst-sgs-box .kjst-ql .qs{margin-left:auto;white-space:nowrap;color:#666}',
+      '#kjst-sgs-box .kjst-ql .qs.ok{color:#27ae60}#kjst-sgs-box .kjst-ql .qs.skip{color:#e67e22}#kjst-sgs-box .kjst-ql .qs.err{color:#c0392b}#kjst-sgs-box .kjst-ql .qs.run{color:#1a5276;font-weight:bold}',
+      '#kjst-sgs-box .kjst-ql .qx{color:#999}'
     ].join('');
     document.head.appendChild(style);
 
@@ -944,6 +1111,7 @@
     var countBox = wrap.querySelector('#kjst-count');
     var autoPaged = {};
     var AUTO = { timer: null, key: '', left: 0, doneKeys: {}, cancelKey: '', cancelMask: '', running: false };
+    var Q = { mode: 'manual', items: [], running: false, stop: false, render: null };   // v4.3 คิวเปลี่ยนวิชา/กลุ่ม (ไม่จำค่า)
 
     function autoOn() { return autoCb.checked; }
     function autoStop() {
@@ -951,11 +1119,12 @@
       AUTO.key = ''; countBox.className = 'kjst-count'; countBox.innerHTML = '';
     }
     function maskOf(rows) { return rows[0] ? FIELDS.map(function (f) { var e = rows[0].fields[f]; return e && !e.disabled ? '1' : '0'; }).join('') : ''; }
-    function keyOf(a, fields) { return PAGE.id + '|' + a.ctx.code + '|' + a.ctx.section + '|' + fields.join(','); }
+    function keyOf(a, fields) { return PAGE.id + '|' + a.ctx.code + '|' + a.ctx.grade + '|' + a.ctx.section + '|' + fields.join(','); }
 
     // เงื่อนไขครบ → นับถอยหลัง 3 วิ แล้วเติมเฉพาะช่องที่ต่างจาก e-Score
     function autoConsider(a) {
       if (!autoOn() || AUTO.running || a.error) return;
+      if (Q.mode === 'auto') { autoStop(); return; }          // v4.3 โหมดคิว: คิวเป็นผู้เติม
       if (!a.rows.length || a.codeMismatch || a.fullProblems.length || !a.hasFillable) { autoStop(); return; }
       if (a.ctx.total != null && a.tbl.rows.length < a.ctx.total) { autoStop(); return; }
       if (a.missing.length) {
@@ -996,7 +1165,7 @@
       }, 1000);
     }
     autoCb.onchange = function () {
-      if (autoOn()) { dryCb.checked = false; dryCb.disabled = true; if (ta.value.trim()) refresh(false); }
+      if (autoOn() && Q.mode !== 'auto') { dryCb.checked = false; dryCb.disabled = true; if (ta.value.trim()) refresh(false); }
       else { dryCb.disabled = false; autoStop(); }
       var o = load(STORE_OPT) || {}; o.auto = autoOn(); store(STORE_OPT, o);
     };
@@ -1006,7 +1175,7 @@
       var p = a.parsed, nstu = 0;
       p.groups.forEach(function (g) { nstu += g.rows.length; });
       meta.className = 'kjst-meta show';
-      meta.textContent = (p.meta ? p.meta.code + ' ' + p.meta.name + ' · ภาค ' + p.meta.term + ' · ' : 'ข้อมูล · ')
+      meta.textContent = (p.multi ? '[' + p.multi.n + ' วิชา] ' : '') + (p.meta ? p.meta.code + ' ' + p.meta.name + ' · ภาค ' + p.meta.term + ' · ' : 'ข้อมูล · ')
         + (p.groups.length > 1 ? p.groups.length + ' กลุ่ม · ' : '') + nstu + ' คน · หน้านี้: ' + (a.hasLabel ? 'ขาด (ชม.)' : '—');
       var st = attStatus(a);
       status.className = 'kjst-status ' + st.cls; status.textContent = st.text;
@@ -1043,18 +1212,188 @@
       }, 1000);
     }
 
+    // ---- v4.3 คิวเปลี่ยนวิชา/กลุ่มอัตโนมัติ (หน้าคะแนน/ประเมิน · ไม่ใช่หน้าขาดเรียน) ----
+    var qBox = wrap.querySelector('#kjst-q'), navSel = wrap.querySelector('#kjst-nav');
+    var Q_SUBJ = 'ctl00_PageContent_ClassSubjectIDFilter', Q_SEC = 'ctl00_PageContent_ClassSectionNoFilter';
+    function qInAsync() {
+      try { return !!(window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager.getInstance().get_isInAsyncPostBack()); } catch (e) { return false; }
+    }
+    // รอจน UpdatePanel แทนที่ element เดิม (= ตารางโหลดใหม่เสร็จ) → 'ok' | 'stop' | ข้อความผิดพลาด
+    async function qWaitReplaced(id, old) {
+      var t0 = Date.now();
+      while (Date.now() - t0 < 90000) {
+        await sleep(300);
+        if (Q.stop) return 'stop';
+        var cur = document.getElementById(id);
+        if (cur && cur !== old && !qInAsync()) { await sleep(500); return 'ok'; }
+      }
+      return 'รอตารางโหลดเกิน 90 วิ';
+    }
+    // ตั้งค่า dropdown + postback แบบเดียวกับ onchange ของ SGS → 'ok' | 'noopt' | 'stop' | ข้อความผิดพลาด
+    async function qPostSelect(id, value) {
+      var sel = document.getElementById(id);
+      if (!sel) return 'ไม่พบเมนู';
+      if (![].some.call(sel.options, function (o) { return o.value === value; })) return 'noopt';
+      if (typeof window.__doPostBack !== 'function') return 'หน้า SGS ไม่มี __doPostBack';
+      sel.value = value;
+      try { window.__doPostBack(sel.name || id.replace(/_/g, '$'), ''); } catch (e) { return 'postback ล้มเหลว'; }
+      return await qWaitReplaced(id, sel);
+    }
+    function qEsc(t) { return String(t).replace(/[&<>"]/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); }
+    function qBuild() {
+      Q.text = ta.value; Q.items = [];
+      parseMulti(ta.value).forEach(function (b) {
+        if (b.parsed.error || !b.code) return;
+        var f = findSubjectOption(b);
+        b.parsed.groups.forEach(function (g) {
+          if (!g.rows.length) return;
+          Q.items.push({ block: b, gname: g.name, sec: String(g.name).replace(/^กลุ่ม\s*/, '').trim(), opt: f.opt || null,
+                         label: b.code + (b.grade ? ' ' + gradeTh(b.grade) : '') + ' ' + (b.name || '') + ' · ' + g.name,
+                         on: !!f.opt, st: f.opt ? '' : 'ข้าม: ' + f.error, cls: f.opt ? '' : 'skip' });
+        });
+      });
+    }
+    function qPaint(it) {
+      var el = qBox.querySelector('[data-qs="' + Q.items.indexOf(it) + '"]');
+      if (!el) return;
+      el.className = 'qs ' + (it.cls || ''); el.textContent = it.st || '';
+      if (it.cls === 'run') { try { el.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+    }
+    function qRender() {
+      if (!qBox) return;
+      if (Q.mode !== 'auto') { qBox.className = 'kjst-q'; qBox.innerHTML = ''; return; }
+      if (!Q.running && Q.text !== ta.value) qBuild();
+      qBox.className = 'kjst-q show';
+      var nsub = {}, non = 0;
+      Q.items.forEach(function (it) { nsub[it.block.code + '|' + it.block.grade] = 1; if (it.on) non++; });
+      if (!Q.items.length) {
+        qBox.innerHTML = '<b>คิวอัตโนมัติ</b><br>' + (ta.value.trim() ? 'ข้อมูลที่วางไม่มีกลุ่มที่เติมได้' : 'วางข้อมูลจาก e-Score ก่อน (คัดลอกทีละวิชา หรือ "คัดลอกทุกวิชาที่แสดง" จากหน้า admin)');
+        return;
+      }
+      qBox.innerHTML = '<div class="kjst-row" style="justify-content:space-between;margin:0"><b>คิว ' + Object.keys(nsub).length + ' วิชา · ' + Q.items.length + ' กลุ่ม (เลือก ' + non + ')</b>'
+        + (Q.running ? '' : '<span><button class="kjst-mini" id="kjst-qall">ทั้งหมด</button> <button class="kjst-mini" id="kjst-qnone">ไม่เลือก</button></span>') + '</div>'
+        + '<div class="kjst-ql">' + Q.items.map(function (it, i) {
+            return '<label class="' + (it.opt ? '' : 'qx') + '"><input type="checkbox" data-qi="' + i + '"' + (it.on ? ' checked' : '') + (it.opt && !Q.running ? '' : ' disabled') + '>'
+              + '<span>' + qEsc(it.label) + '</span><span class="qs" data-qs="' + i + '"></span></label>';
+          }).join('') + '</div>'
+        + '<div class="kjst-btnrow"><button class="kjst-mini" id="kjst-qgo" style="flex:1 1 auto;font-weight:bold"' + (Q.running || !non ? ' disabled' : '') + '>'
+        + (Q.running ? 'กำลังทำตามคิว…' : '▶ เริ่มตามคิว' + (dryCb.checked ? ' (ทดลอง)' : '')) + '</button>'
+        + (Q.running ? '<button class="kjst-mini" id="kjst-qstop" style="color:#c0392b">■ หยุด</button>' : '') + '</div>'
+        + '<div style="color:#666;margin-top:3px">ไม่ผ่านด่านตรวจ (วิชา/ชั้น/คะแนนเต็ม/รายชื่อ) = ข้าม · ติ๊ก "ทดลอง" เพื่อเดินคิวโดยไม่เติม</div>';
+      Q.items.forEach(function (it) { qPaint(it); });
+      qBox.querySelectorAll('[data-qi]').forEach(function (cb) { cb.onchange = function () { Q.items[+cb.getAttribute('data-qi')].on = cb.checked; qRender(); }; });
+      var b;
+      if ((b = qBox.querySelector('#kjst-qall'))) b.onclick = function () { Q.items.forEach(function (it) { if (it.opt) it.on = true; }); qRender(); };
+      if ((b = qBox.querySelector('#kjst-qnone'))) b.onclick = function () { Q.items.forEach(function (it) { it.on = false; }); qRender(); };
+      if ((b = qBox.querySelector('#kjst-qgo'))) b.onclick = function () { qRun(); };
+      if ((b = qBox.querySelector('#kjst-qstop'))) b.onclick = function () { Q.stop = true; this.disabled = true; this.textContent = 'กำลังหยุด…'; };
+    }
+    Q.render = qRender;
+    // ทำ 1 รายการ → { cls: ok|skip|err, st, fatal }
+    async function qDoItem(it, dry) {
+      var skip = function (m) { return { cls: 'skip', st: 'ข้าม: ' + m }; };
+      var stopped = { cls: '', st: 'หยุด' };
+      var sel = document.getElementById(Q_SUBJ);
+      if (!sel) return { cls: 'err', st: 'ไม่พบเมนูรายวิชา', fatal: true };
+      if (sel.value !== it.opt.value) {
+        var r1 = await qPostSelect(Q_SUBJ, it.opt.value);
+        if (r1 === 'stop') return stopped;
+        if (r1 === 'noopt') return skip('ไม่พบวิชาในเมนู SGS');
+        if (r1 !== 'ok') return { cls: 'err', st: 'เลือกวิชาไม่ได้: ' + r1, fatal: true };
+      }
+      // SGS คงค่ากลุ่มเดิมเมื่อเปลี่ยนวิชา (ตารางอาจเป็นกลุ่มเดิม/ว่าง) → เลือกกลุ่มใหม่ทุกครั้ง
+      var r2 = await qPostSelect(Q_SEC, it.sec);
+      if (r2 === 'stop') return stopped;
+      if (r2 === 'noopt') return skip('SGS ไม่มีกลุ่ม ' + it.sec);
+      if (r2 !== 'ok') return { cls: 'err', st: 'เลือกกลุ่มไม่ได้: ' + r2, fatal: true };
+      var a = analyze(ta.value);
+      if (!a.error && a.tbl.rows.length && a.ctx.total != null && a.tbl.rows.length < a.ctx.total) {
+        var psId = 'ctl00_PageContent_' + PAGE.pag + '__PageSize', ps0 = document.getElementById(psId);
+        if (!ensurePageSize(a.ctx, a.tbl.rows.length)) return skip('แสดง ' + a.tbl.rows.length + ' จาก ' + a.ctx.total + ' คน ตั้งจำนวนต่อหน้าไม่ได้');
+        var r3 = await qWaitReplaced(psId, ps0);
+        if (r3 === 'stop') return stopped;
+        if (r3 !== 'ok') return { cls: 'err', st: 'ตั้งจำนวนต่อหน้า: ' + r3, fatal: true };
+        a = analyze(ta.value);
+      }
+      if (a.error) return skip(a.error);
+      if (!a.hasFillable) return skip('ข้อมูลไม่มีคอลัมน์ของหน้านี้');
+      if (!a.tbl.rows.length) return skip(PAGE.create ? 'ยังไม่สร้างตารางประเมินของวิชานี้ใน SGS' : 'ตารางว่าง (SGS ไม่มีกลุ่มนี้?)');
+      if (a.parsed !== it.block.parsed) return skip('SGS เปิดวิชาอื่นอยู่ (' + (a.ctx.subject || '-') + ')');
+      if (a.codeMismatch || !a.rows.length) return skip('ตารางไม่ใช่วิชา ' + it.block.code);
+      if (a.ctx.total != null && a.tbl.rows.length < a.ctx.total) return skip('แสดง ' + a.tbl.rows.length + ' จาก ' + a.ctx.total + ' คน');
+      if (a.fullProblems.length) return skip('คะแนนเต็ม SGS ไม่ตรง — ' + a.fullProblems.join(' · '));
+      if (a.missing.length) return skip(a.missing.length + ' คนใน SGS ไม่มีในข้อมูล (' + a.missing.slice(0, 3).join(', ') + (a.missing.length > 3 ? ' …' : '') + ')');
+      if (!a.det || a.det.group.name !== it.gname) return skip('รายชื่อในตารางเป็น ' + (a.det ? a.det.group.name : '-') + ' ไม่ใช่ ' + it.gname);
+      var plan = planCells(a.parsed, a.rows, true);
+      if (!plan.cells.length) return { cls: 'ok', st: '= ตรงแล้ว (' + a.matched + ' คน)' };
+      var box = document.createElement('div');
+      var res = await run({ text: ta.value, speed: speed.value, dryRun: dry, overwrite: true, auto: true, clickSave: saveCb.checked }, box, null);
+      if (!res) { var errs = box.querySelectorAll('.err'); return skip(errs.length ? errs[errs.length - 1].textContent.replace(/^✗\s*/, '') : 'ไม่เติม'); }
+      if (res.how === 'clicked') return { cls: 'err', st: 'บันทึกแบบโหลดหน้าใหม่ — คลิก bookmarklet แล้วเริ่มคิวต่อ', fatal: true };
+      if (res.bad) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง · ผิด ' + res.bad + ' ช่อง (ตรวจในตาราง)' };
+      if (dry) return { cls: 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' };
+      if (!res.how && !PAGE.ajax) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่ไม่ได้บันทึก (ปิด "กด บันทึก ให้")' };
+      return { cls: 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.how === 'fetched' ? ' · บันทึกแล้ว' : '') };
+    }
+    async function qRun() {
+      if (Q.running) return;
+      var todo = Q.items.filter(function (it) { return it.on && it.opt; });
+      if (!todo.length) return;
+      var dry = dryCb.checked;
+      if (!dry && !confirm('เติม' + (saveCb.checked ? ' + บันทึก' : '') + ' ' + todo.length + ' กลุ่มตามคิว ในหน้า ' + PAGE.name + ' ?\n\nเครื่องมือจะเปลี่ยนวิชา/กลุ่มใน SGS เอง · ไม่ผ่านด่านตรวจ = ข้าม · กด "หยุด" ได้ตลอด\n(ติ๊ก "ทดลอง" เพื่อเดินคิวก่อนได้)')) return;
+      Q.running = true; Q.stop = false; autoStop(); btn.disabled = true; out.innerHTML = '';
+      todo.forEach(function (it) { it.st = 'รอ'; it.cls = ''; });
+      qRender();
+      var t0 = Date.now(), cnt = { ok: 0, skip: 0, err: 0 };
+      for (var i = 0; i < todo.length; i++) {
+        if (Q.stop) break;
+        var it = todo[i]; it.st = 'กำลังทำ…'; it.cls = 'run'; qPaint(it);
+        var r;
+        try { r = await qDoItem(it, dry); } catch (e) { r = { cls: 'err', st: 'ผิดพลาด: ' + e }; }
+        it.st = r.st; it.cls = r.cls; qPaint(it);
+        if (cnt[r.cls] != null) cnt[r.cls]++;
+        if (r.fatal) { Q.stop = true; break; }
+        await sleep(dry ? 300 : 800);
+      }
+      todo.forEach(function (x) { if (x.st === 'รอ' || x.st === 'หยุด') { x.st = 'ยังไม่ทำ (หยุด)'; x.cls = 'skip'; } });
+      Q.running = false; Q.stop = false; btn.disabled = false;
+      var sec = Math.round((Date.now() - t0) / 1000);
+      var head = (dry ? '[ทดลอง] ' : '') + 'สรุปคิว ' + PAGE.name + ' · ' + todo.length + ' กลุ่ม · ' + sec + ' วิ — สำเร็จ ' + cnt.ok + ' · ข้าม ' + cnt.skip + ' · ผิดพลาด ' + cnt.err;
+      log(out, head, cnt.err ? 'err' : cnt.skip ? 'warn' : 'ok');
+      var lines = todo.map(function (x) { return x.label + ' — ' + x.st; });
+      lines.forEach(function (l, k) { log(out, l, todo[k].cls === 'ok' ? '' : todo[k].cls === 'err' ? 'err' : 'warn'); });
+      var cp = document.createElement('button'); cp.className = 'kjst-mini'; cp.textContent = 'คัดลอกสรุป';
+      cp.onclick = function () { var t = [head].concat(lines).join('\n'); try { navigator.clipboard.writeText(t).then(function () { cp.textContent = 'คัดลอกแล้ว'; }); } catch (e) {} };
+      out.appendChild(cp);
+      qRender(); refresh(false);
+    }
+    if (navSel) navSel.onchange = function () {
+      if (Q.running) { navSel.value = 'auto'; return; }
+      Q.mode = navSel.value; Q.text = null;
+      if (Q.mode === 'auto') { autoStop(); dryCb.disabled = false; }
+      else if (autoOn()) { dryCb.checked = false; dryCb.disabled = true; }
+      qRender(); if (ta.value.trim()) refresh(false);
+    };
+    dryCb.addEventListener('change', function () { if (Q.mode === 'auto' && !Q.running) qRender(); });
+
     // ---- สถานะ (เรียกทุกครั้งที่ข้อมูล/หน้าเปลี่ยน) ----
     function refresh(save) {
       var text = ta.value;
       if (!text.trim()) { meta.className = 'kjst-meta'; meta.textContent = ''; status.className = 'kjst-status'; status.textContent = ''; autoStop(); return; }
       var a = analyze(text);
-      if (a.error) { meta.className = 'kjst-meta'; meta.textContent = ''; status.className = 'kjst-status err'; status.textContent = '✗ ' + a.error; return; }
+      if (a.error) {
+        var nb = parseMulti(text).length;
+        meta.className = nb > 1 ? 'kjst-meta show' : 'kjst-meta'; meta.textContent = nb > 1 ? 'ข้อมูล ' + nb + ' วิชา' : '';
+        status.className = 'kjst-status err'; status.textContent = '✗ ' + a.error;
+        if (save) { store(STORE_KEY, { text: text, at: Date.now() }); AUTO.doneKeys = {}; AUTO.cancelKey = ''; }
+        autoStop(); return;
+      }
       if (PAGE.att) { attRefreshUI(a, save); return; }
       var p = a.parsed, ng = p.groups.length, nstu = 0;
       p.groups.forEach(function (g) { nstu += g.rows.length; });
       var here = (p.labels || []).filter(function (lb) { return mapLabel(lb); });
       meta.className = 'kjst-meta show';
-      meta.textContent = (p.meta ? (p.meta.code + ' ' + p.meta.name + ' · ภาค ' + p.meta.term + ' · ') : 'ข้อมูล (รูปแบบเดิม) · ')
+      meta.textContent = (p.multi ? '[' + p.multi.n + ' วิชา] ' : '') + (p.meta ? (p.meta.code + ' ' + p.meta.name + (p.multi && p.multi.grade ? ' ' + gradeTh(p.multi.grade) : '') + ' · ภาค ' + p.meta.term + ' · ') : 'ข้อมูล (รูปแบบเดิม) · ')
         + (ng > 1 ? ng + ' กลุ่ม · ' : '') + nstu + ' คน · หน้านี้: ' + (here.length ? here.join(', ') : '—');
       var ctxLine = 'SGS: ' + PAGE.name + (a.ctx.subject ? ' · ' + a.ctx.subject : '') + (a.ctx.section ? ' · กลุ่ม ' + a.ctx.section : '') + '\n';
       var cmpLine = '';
@@ -1117,8 +1456,13 @@
         if (t === ta.value.trim()) { if (!auto) log(out, 'คลิปบอร์ดเป็นข้อมูลชุดเดียวกับที่จำไว้', ''); return; }
         ta.value = t; out.innerHTML = ''; guide.style.display = 'none';
         refresh(true);
-        var p = parsePayload(t), ng = p.groups ? p.groups.length : 0;
-        log(out, '✓ โหลดข้อมูลใหม่จากคลิปบอร์ด: ' + (p.meta ? p.meta.code + ' ' + p.meta.name : '') + (ng > 1 ? ' · ' + ng + ' กลุ่ม' : ''), 'ok');
+        var bl = parseMulti(t);
+        if (bl.length > 1) log(out, '✓ โหลดข้อมูลใหม่จากคลิปบอร์ด: ' + bl.length + ' วิชา (' + bl.slice(0, 4).map(function (b) { return b.code; }).join(', ') + (bl.length > 4 ? ' …' : '') + ')', 'ok');
+        else {
+          var p = parsePayload(t), ng = p.groups ? p.groups.length : 0;
+          log(out, '✓ โหลดข้อมูลใหม่จากคลิปบอร์ด: ' + (p.meta ? p.meta.code + ' ' + p.meta.name : '') + (ng > 1 ? ' · ' + ng + ' กลุ่ม' : ''), 'ok');
+        }
+        if (Q.render) Q.render();
       }).catch(function () { if (!auto) log(out, 'อ่านคลิปบอร์ดไม่ได้ (ไม่ได้อนุญาต) — กด Ctrl+V ในกล่องแทน', 'warn'); });
     }
     wrap.querySelector('#kjst-paste').onclick = function () { tryClipboard(false); };
@@ -1130,14 +1474,15 @@
     }
     tryClipboard(true);
 
-    ta.addEventListener('input', function () { out.innerHTML = ''; refresh(true); });
-    ta.addEventListener('paste', function () { setTimeout(function () { out.innerHTML = ''; refresh(true); }, 0); });
+    ta.addEventListener('input', function () { out.innerHTML = ''; refresh(true); qRender(); });
+    ta.addEventListener('paste', function () { setTimeout(function () { out.innerHTML = ''; refresh(true); qRender(); }, 0); });
 
     // ตาราง SGS เปลี่ยน (กลุ่ม/จำนวนต่อหน้า/ติ๊กคอลัมน์/โหลดหลังบันทึก) → รีเฟรชสถานะเอง
     var lastSig = '';
     setInterval(function () {
       if (!document.body.contains(wrap)) return;
       if (PAGE.att && AUTO.running) return;      // หน้าขาดเรียน: ไม่รีเฟรชระหว่างกรอก
+      if (Q.running) return;                     // v4.3 คิวกำลังเปลี่ยนวิชา/กลุ่ม — คิวเรียก refresh เอง
       var sig;
       if (PAGE.att) sig = attSig();
       else {
@@ -1161,7 +1506,8 @@
     wrap.querySelector('#kjst-help').onclick = function () { guide.style.display = guide.style.display === 'none' ? 'block' : 'none'; };
     wrap.querySelector('#kjst-close').onclick = function () { wrap.remove(); if (style.parentNode) style.parentNode.removeChild(style); };
     wrap.querySelector('#kjst-clear').onclick = function () {
-      ta.value = ''; out.innerHTML = ''; store(STORE_KEY, null); refresh(false);
+      if (Q.running) return;
+      ta.value = ''; out.innerHTML = ''; store(STORE_KEY, null); refresh(false); qRender();
       clearMarks();
       ta.focus();
     };
