@@ -4,6 +4,12 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.2 — หน้าคะแนน (กลางภาค/ปลายภาค) ยืนยันการบันทึกทีละช่อง (ผู้ใช้กำหนด 6 ต.ค. 2569):
+ *   - ห่อ PageMethods.SaveMe/GetGr → กรอกช่องถัดไปเมื่อ server ตอบแล้วเท่านั้น (ทั้งโหมดครูและคิว)
+ *   - รอไม่เกิน 1 วิ/ช่อง (SAVE_WAIT_MS) → เกิน = หยุดเติม แจ้ง "server ตอบช้าเกินไป" (คิวหยุดด้วย) · ตอบไม่ผ่าน = ส่งซ้ำ 1 รอบ แล้วจึงรายงาน
+ *   - โหมดคิว: ติ๊ก checkbox หัวคอลัมน์ให้เองเฉพาะคอลัมน์ที่ข้อมูลมีค่า (SGS ล้างติ๊กเมื่อเปลี่ยนวิชา · โหมดครูยังติ๊กเอง)
+ *   - โหมดคิว: server ยืนยันทุกช่องแล้ว → ไม่กดปุ่มบันทึก (กันหน้าโหลดใหม่) · โหมดครูยังกดตามตัวเลือกเพื่อแสดงผล · server ช้า → ไม่กด
+ *
  * v4.3.1 — ผลทดสอบจริง v4.3: คิวอัตโนมัติบันทึกแล้วกล่องหาย (หน้าโหลดใหม่) แต่เติมเอง (ด้วยตัวเอง) กล่องไม่หาย
  *   - บันทึกเบื้องหลัง (fetch) ส่ง __EVENTTARGET/__EVENTARGUMENT ว่างเสมอ (หลังเปลี่ยนเมนูด้วย async postback ค่านี้อาจค้างชื่อเมนู)
  *   - โหมดคิว: fetch ล้มเหลว → ไม่กดปุ่มจริง (ไม่โหลดหน้าใหม่) หยุดคิว + แสดงเหตุผล · โหมดด้วยตัวเองยังกดปุ่มจริงแทนเหมือนเดิม แต่บอกเหตุผล
@@ -63,7 +69,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3.1';
+  var VERSION = '4.3.2';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -627,6 +633,44 @@
     el.blur();
   }
 
+  /* v4.3.2 หน้าคะแนน (MID/FINAL): SGS บันทึกทีละช่องด้วย PageMethods.SaveMe (ตอบ "True" = บันทึกแล้ว แล้วเรียก GetGr แสดงผลรวม)
+   *   SGS เก็บ "ช่องล่าสุด" ในตัวแปรร่วม (ctrlid) → ถ้ากรอกเร็วกว่า server ตอบแล้วมีช่องไม่ผ่าน SGS จะล้างผิดช่อง
+   *   → ห่อ SaveMe/GetGr เพื่อรู้ผลจริง แล้วกรอกช่องถัดไปเมื่อตอบแล้วเท่านั้น · รอไม่เกิน SAVE_WAIT_MS ต่อช่อง (ผู้ใช้กำหนด 1 วิ) */
+  var SAVE_WAIT_MS = 1000;
+  function smHook() {
+    var pm = window.PageMethods;
+    if (!pm || typeof pm.SaveMe !== 'function') return null;           // ไม่มี → แบบเดิม (รอ 1.5 วิ)
+    var oSave = pm.SaveMe, oGr = pm.GetGr;
+    var H = { calls: 0, last: null };
+    pm.SaveMe = function (a, b, c, onOk, onBad, ctx) {
+      var rec = { done: false, ok: false, msg: '', gr: typeof oGr !== 'function' };
+      H.calls++; H.last = rec;
+      return oSave.call(pm, a, b, c,
+        function (res) { rec.done = true; rec.ok = String(res) === 'True'; rec.msg = rec.ok ? '' : String(res); if (!rec.ok) rec.gr = true; if (typeof onOk === 'function') return onOk.apply(this, arguments); },
+        function (err) { rec.done = true; rec.ok = false; rec.gr = true; rec.msg = String((err && (err._message || (err.get_message && err.get_message()))) || err); if (typeof onBad === 'function') return onBad.apply(this, arguments); },
+        ctx);
+    };
+    if (typeof oGr === 'function') pm.GetGr = function (t, onOk, onBad, ctx) {
+      var rec = H.last, fin = function () { if (rec) rec.gr = true; };
+      return oGr.call(pm, t, function () { fin(); if (typeof onOk === 'function') return onOk.apply(this, arguments); },
+                              function () { fin(); if (typeof onBad === 'function') return onBad.apply(this, arguments); }, ctx);
+    };
+    H.restore = function () { pm.SaveMe = oSave; if (typeof oGr === 'function') pm.GetGr = oGr; };
+    return H;
+  }
+  async function smWait(cond, ms) { var t0 = Date.now(); while (!cond()) { if (Date.now() - t0 >= ms) return false; await sleep(20); } return true; }
+  // กรอก 1 ช่องแล้วรอ server → 'ok' | 'reject' (SGS ไม่ส่ง — เกินเต็ม) | 'slow' (เกิน SAVE_WAIT_MS) | 'fail:<ข้อความ>'
+  async function smFill(H, el, val) {
+    var before = H.calls;
+    setValue(el, val);
+    if (H.calls === before) return 'reject';
+    var rec = H.last;
+    if (!(await smWait(function () { return rec.done; }, SAVE_WAIT_MS))) return 'slow';
+    if (!rec.ok) return 'fail:' + rec.msg;
+    await smWait(function () { return rec.gr; }, SAVE_WAIT_MS);      // GetGr แสดงผลรวม — ช้าได้ ไม่ถือว่าผิด
+    return 'ok';
+  }
+
   /* analyze — ทุกอย่างที่ต้องรู้ก่อนเติม */
   function analyze(text) {
     if (PAGE.att) return attAnalyze(text);
@@ -963,22 +1007,53 @@
     var delay = SPEED[cfg.speed] || SPEED.fast;
     var plan = planCells(parsed, rows, cfg.overwrite);
     var okCells = 0, filledStudents = 0, done = [], lastSid = null, total = plan.students;
+    // v4.3.2 หน้าคะแนน: ดักผล PageMethods.SaveMe ทีละช่อง → กรอกช่องถัดไปเมื่อ server ตอบแล้วเท่านั้น
+    var H = (!cfg.dryRun && PAGE.ajax) ? smHook() : null;
+    var slow = null, failed = [], rejected = 0, retried = 0;
+    var dropAlerts = function (cell) { alerts = alerts.filter(function (l) { return l.indexOf(cell + ': ') !== 0; }); };
     try {
       for (var i = 0; i < plan.cells.length; i++) {
         var c = plan.cells[i], el = c.el, val = c.val;
         curCell = c.row.sid + ' ' + c.F;
         if (cfg.dryRun) { el.style.outline = '2px solid #e67e22'; el.title = 'จะเติม: ' + val; }
+        else if (H) {
+          if (ui) ui.textContent = 'กำลังเติม… ' + (filledStudents + (c.row.sid !== lastSid ? 1 : 0)) + '/' + total;
+          var r = await smFill(H, el, val);
+          if (r === 'slow') { slow = c; el.style.outline = '2px solid #c0392b'; break; }
+          if (r === 'reject') { rejected++; el.style.outline = '2px solid #c0392b'; continue; }   // SGS ตรวจไม่ผ่าน (เกินเต็ม) — alert ถูกดักไว้แล้ว
+          if (r !== 'ok') { failed.push({ c: c, msg: r.slice(5) }); el.style.outline = '2px solid #e67e22'; continue; }
+          el.style.outline = '2px solid #27ae60'; done.push({ el: el, val: val, sid: c.row.sid, f: c.F });
+        }
         else { setValue(el, val); el.style.outline = '2px solid #27ae60'; done.push({ el: el, val: val, sid: c.row.sid, f: c.F }); }
         okCells++;
         if (c.row.sid !== lastSid) { lastSid = c.row.sid; filledStudents++; }
         if (!cfg.dryRun) { if (ui) ui.textContent = 'กำลังเติม… ' + filledStudents + '/' + total; await sleep(PAGE.ajax ? delay : 15); }
       }
-    } catch (e) { window.alert = origAlert; throw e; }
+      // server ตอบว่าไม่ผ่าน → ส่งซ้ำ 1 รอบ (SGS ล้างช่องนั้นไปแล้ว)
+      if (H && !slow && failed.length) {
+        var again = failed; failed = [];
+        for (var j = 0; j < again.length; j++) {
+          var fc = again[j].c;
+          curCell = fc.row.sid + ' ' + fc.F;
+          if (ui) ui.textContent = 'ส่งซ้ำ ' + (j + 1) + '/' + again.length + '…';
+          retried++;
+          var r2 = await smFill(H, fc.el, fc.val);
+          if (r2 === 'slow') { slow = fc; fc.el.style.outline = '2px solid #c0392b'; break; }
+          if (r2 === 'ok') {
+            dropAlerts(curCell);
+            fc.el.style.outline = '2px solid #27ae60'; done.push({ el: fc.el, val: fc.val, sid: fc.row.sid, f: fc.F }); okCells++;
+          } else { failed.push({ c: fc, msg: r2 === 'reject' ? 'SGS ไม่รับค่า' : r2.slice(5) }); fc.el.style.outline = '2px solid #c0392b'; }
+          await sleep(delay);
+        }
+      }
+    } catch (e) { window.alert = origAlert; if (H) H.restore(); throw e; }
+    if (H) H.restore();
+    if (!cfg.dryRun) { var us = {}; done.forEach(function (x) { us[x.sid] = 1; }); filledStudents = Object.keys(us).length; }
 
-    // ---- ตรวจค่ากลับ (หน้า AJAX รอ callback ของ SGS ก่อน) ----
+    // ---- ตรวจค่ากลับ (หน้า AJAX ที่ดักผลไม่ได้ รอ callback ของ SGS 1.5 วิ) ----
     var bad = [];
     if (!cfg.dryRun) {
-      if (PAGE.ajax) { if (ui) ui.textContent = 'รอ SGS บันทึก…'; await sleep(1500); }
+      if (PAGE.ajax && !H) { if (ui) ui.textContent = 'รอ SGS บันทึก…'; await sleep(1500); }
       done.forEach(function (d) {
         if (!sameVal(d.el.value, d.val)) { bad.push(d.sid + ' ' + d.f + ' (ส่ง ' + d.val + ' ได้ "' + d.el.value + '")'); d.el.style.outline = '2px solid #c0392b'; }
       });
@@ -986,7 +1061,10 @@
     window.alert = origAlert;
 
     log(box, '─────────────', '');
-    log(box, (cfg.dryRun ? '[ทดลอง] ' : '✓ ') + 'เติม ' + okCells + ' ช่อง · นักเรียน ' + filledStudents + ' คน' + (cfg.auto ? ' (อัตโนมัติ)' : ''), cfg.dryRun ? 'warn' : 'ok');
+    log(box, (cfg.dryRun ? '[ทดลอง] ' : slow ? '⚠ ' : '✓ ') + 'เติม ' + okCells + ' ช่อง · นักเรียน ' + filledStudents + ' คน' + (H ? ' (server ยืนยันทุกช่อง)' : '') + (cfg.auto ? ' (อัตโนมัติ)' : ''), cfg.dryRun || slow ? 'warn' : 'ok');
+    if (slow) log(box, '✗ server SGS ตอบช้าเกินไป (เกิน ' + (SAVE_WAIT_MS / 1000) + ' วิ) ที่ ' + slow.row.sid + ' ' + fieldLabel(slow.F) + ' — หยุดเติม เหลืออีก ' + (plan.cells.length - okCells - rejected - failed.length) + ' ช่อง · ลองใหม่ช่วงคนใช้น้อย (ค่าที่ server ยืนยันแล้วบันทึกแล้ว)', 'err');
+    if (retried) log(box, '· ส่งซ้ำ ' + retried + ' ช่องที่ server ตอบไม่ผ่าน' + (failed.length ? '' : ' — ผ่านทั้งหมด'), failed.length ? 'warn' : '');
+    if (failed.length) log(box, '✗ server ไม่บันทึก ' + failed.length + ' ช่อง (ส่งซ้ำแล้ว): ' + failed.slice(0, 5).map(function (x) { return x.c.row.sid + ' ' + x.c.F + (x.msg ? ' (' + x.msg + ')' : ''); }).join(', ') + (failed.length > 5 ? ' …' : ''), 'err');
     if (plan.skipSame) log(box, '· เท่าเดิมอยู่แล้ว ข้าม ' + plan.skipSame + ' ช่อง');
     if (plan.skipDisabled) log(box, '· ข้ามช่องปิด/ยังไม่ติ๊ก: ' + plan.skipDisabled + ' ช่อง');
     if (plan.skipFilled) log(box, '· ข้ามช่องที่มีค่าอยู่แล้ว: ' + plan.skipFilled + ' ช่อง (เปิด "ทับค่าเดิม" ถ้าต้องการ)', 'warn');
@@ -1000,10 +1078,12 @@
     var elsewhere = Object.keys(a.elsewhere);
     if (elsewhere.length) log(box, 'ℹ ข้อมูลชุดนี้มีส่วนที่ต้องไปหน้าอื่น: ' + elsewhere.map(function (n) { return n + ' (' + a.elsewhere[n].join(', ') + ')'; }).join(' · '));
     if (cfg.dryRun) log(box, 'ยังไม่บันทึกจริง — เอาเครื่องหมาย "ทดลอง" ออกแล้วกดอีกครั้ง', 'warn');
-    else if (!bad.length && !alerts.length) log(box, '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปได้เลย', 'ok');
+    else if (!slow && !bad.length && !alerts.length && !failed.length) log(box, '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปได้เลย', 'ok');
 
     // ---- บันทึก: หน้าประเมินต้อง "เลือกทั้งหมด" ก่อน (SGS บันทึกเฉพาะแถวที่เลือก) แล้วส่งฟอร์มแบบไม่โหลดหน้าใหม่ ----
-    if (!cfg.dryRun && (cfg.clickSave || !PAGE.ajax) && okCells > 0) {
+    // v4.3.2: หน้าคะแนนที่ server ยืนยันทุกช่องแล้ว + โหมดคิว → ไม่กดบันทึก (ไม่จำเป็น และกันหน้าโหลดใหม่) · server ช้า → ไม่กด
+    var skipSave = slow || (H && cfg.noClick);
+    if (!cfg.dryRun && !skipSave && (cfg.clickSave || !PAGE.ajax) && okCells > 0) {
       if (PAGE.toggleAll) {
         if (selectAllRows()) log(box, '☑ เลือกทั้งหมดให้แล้ว');
         else log(box, '⚠ หากล่อง "เลือกทั้งหมด" ไม่พบ — SGS อาจไม่บันทึก กรุณาติ๊กเองแล้วกดบันทึก', 'warn');
@@ -1015,7 +1095,7 @@
       else if (how === 'clicked') log(box, '💾 บันทึกเบื้องหลังไม่สำเร็จ (' + lastSaveError + ') จึงกดปุ่ม "บันทึก" ของ SGS ให้ — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อทำกลุ่มต่อไป', 'ok');
       else log(box, '⚠ หาปุ่ม "บันทึก" ของ SGS ไม่พบ — กรุณากดบันทึกเอง', 'warn');
     }
-    return { ok: okCells, bad: bad.length + alerts.length, how: how, students: filledStudents };
+    return { ok: okCells, bad: bad.length + alerts.length + failed.length, how: how, students: filledStudents, slow: !!slow };
   }
 
   /* -------------------------------------------------------------------------- */
@@ -1310,6 +1390,23 @@
       if ((b = qBox.querySelector('#kjst-qstop'))) b.onclick = function () { Q.stop = true; this.disabled = true; this.textContent = 'กำลังหยุด…'; };
     }
     Q.render = qRender;
+    // ติ๊ก checkbox หัวคอลัมน์ (onclick ของ SGS เปิดช่องทั้งคอลัมน์ ฝั่ง client) ของคอลัมน์ที่ข้อมูลกลุ่มนี้มีค่า → รายชื่อคอลัมน์ที่ติ๊ก
+    function qTickColumns(a) {
+      var need = {}, out = [];
+      a.rows.forEach(function (r) {
+        var rec = a.parsed.index[r.sid]; if (!rec) return;
+        Object.keys(rec.values).forEach(function (lb) { var F = mapLabel(lb); if (F && PAGE.checks[F] && r.fields[F]) need[F] = true; });
+      });
+      Object.keys(need).forEach(function (F) {
+        var el0 = a.rows[0].fields[F];
+        if (el0 && !el0.disabled) return;                                 // เปิดอยู่แล้ว
+        var cb = document.getElementById('ctl00_PageContent_' + PAGE.checks[F]);
+        if (!cb || cb.disabled) return;
+        if (cb.checked) { cb.checked = false; }                           // ติ๊กค้างแต่ช่องปิด → กดใหม่ให้ onclick เปิดช่อง
+        try { cb.click(); out.push(F); } catch (e) {}
+      });
+      return out;
+    }
     // ทำ 1 รายการ → { cls: ok|skip|err, st, fatal }
     async function qDoItem(it, dry) {
       var skip = function (m) { return { cls: 'skip', st: 'ข้าม: ' + m }; };
@@ -1342,6 +1439,9 @@
       }
       if (a.error) return skip(a.error);
       if (!a.hasFillable) return skip('ข้อมูลไม่มีคอลัมน์ของหน้านี้');
+      // หน้าคะแนน: ช่องเปิดเมื่อติ๊กหัวคอลัมน์ (SGS ล้างติ๊กเมื่อเปลี่ยนวิชา · เปลี่ยนกลุ่มติ๊กค้าง) → คิวติ๊กให้เฉพาะคอลัมน์ที่ข้อมูลมีค่า
+      var ticked = a.rows.length && a.parsed === it.block.parsed ? qTickColumns(a) : [];
+      if (ticked.length) { qTrace('ติ๊กหัวคอลัมน์ ' + ticked.join(',')); it.ticked = ticked; await sleep(200); a = analyze(ta.value); if (a.error) return skip(a.error); }
       if (!a.tbl.rows.length) return skip(PAGE.create ? 'ยังไม่สร้างตารางประเมินของวิชานี้ใน SGS' : 'ตารางว่าง (SGS ไม่มีกลุ่มนี้?)');
       if (a.parsed !== it.block.parsed) return skip('SGS เปิดวิชาอื่นอยู่ (' + (a.ctx.subject || '-') + ')');
       if (a.codeMismatch || !a.rows.length) return skip('ตารางไม่ใช่วิชา ' + it.block.code);
@@ -1350,6 +1450,9 @@
       if (a.missing.length) return skip(a.missing.length + ' คนใน SGS ไม่มีในข้อมูล (' + a.missing.slice(0, 3).join(', ') + (a.missing.length > 3 ? ' …' : '') + ')');
       if (!a.det || a.det.group.name !== it.gname) return skip('รายชื่อในตารางเป็น ' + (a.det ? a.det.group.name : '-') + ' ไม่ใช่ ' + it.gname);
       var plan = planCells(a.parsed, a.rows, true);
+      // หน้าคะแนน: ช่องของคอลัมน์ที่ยังไม่ติ๊กหัวตารางถูกปิด (disabled) → ห้ามสรุปว่า "ตรงแล้ว"
+      var offNote = plan.skipDisabled ? ' · ข้ามช่องปิด ' + plan.skipDisabled + ' ช่อง (ติ๊กหัวคอลัมน์แล้วยังไม่เปิด)' : '';
+      if (!plan.cells.length && plan.skipDisabled) return skip('ช่องคะแนนปิดอยู่ ' + plan.skipDisabled + ' ช่อง (ติ๊กหัวคอลัมน์ไม่ได้/ไม่เปิด)');
       if (!plan.cells.length) return { cls: 'ok', st: '= ตรงแล้ว (' + a.matched + ' คน)' };
       var box = document.createElement('div');
       qTrace('เติม ' + plan.cells.length + ' ช่อง' + (dry ? ' (ทดลอง)' : '') + ' แล้วบันทึก');
@@ -1358,10 +1461,11 @@
       if (!res) { var errs = box.querySelectorAll('.err'); return skip(errs.length ? errs[errs.length - 1].textContent.replace(/^✗\s*/, '') : 'ไม่เติม'); }
       if (res.how === 'clicked') return { cls: 'err', st: 'บันทึกแบบโหลดหน้าใหม่ — คลิก bookmarklet แล้วเริ่มคิวต่อ', fatal: true };
       if (/^failed:/.test(res.how || '')) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่บันทึกเบื้องหลังไม่สำเร็จ (' + res.how.slice(7) + ') — หยุดคิว · กด "บันทึก" ของ SGS เองได้', fatal: true };
+      if (res.slow) return { cls: 'err', st: 'server SGS ตอบช้าเกินไป (เกิน ' + (SAVE_WAIT_MS / 1000) + ' วิ/ช่อง) — เติมแล้ว ' + res.ok + ' ช่อง · หยุดคิว ลองใหม่ช่วงคนใช้น้อย', fatal: true };
       if (res.bad) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง · ผิด ' + res.bad + ' ช่อง (ตรวจในตาราง)' };
-      if (dry) return { cls: 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' };
+      if (dry) return { cls: offNote ? 'skip' : 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + offNote };
       if (!res.how && !PAGE.ajax) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่ไม่ได้บันทึก (ปิด "กด บันทึก ให้")' };
-      return { cls: 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.how === 'fetched' ? ' · บันทึกแล้ว' : '') };
+      return { cls: offNote ? 'skip' : 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.how === 'fetched' ? ' · บันทึกแล้ว' : PAGE.ajax ? ' · server ยืนยันทีละช่อง' : '') + offNote };
     }
     async function qRun() {
       if (Q.running) return;
