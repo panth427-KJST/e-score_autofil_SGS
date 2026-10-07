@@ -4,6 +4,10 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.5 — คิวหน้าคะแนน: ทดสอบจริงกดบันทึกเบื้องหลังได้ "response has no table" แต่คะแนนติดครบ (SGS บันทึกทีละช่องแล้ว)
+ *   - คิว + หน้าคะแนน: กดบันทึกเฉพาะเมื่อทีละช่องไม่ครบ (ไม่ผ่าน/ยังไม่ตอบ/ใส่ค่าคืน) · ครบ = ไม่กด เดินคิวต่อ
+ *   - บันทึกเบื้องหลังไม่สำเร็จ: เหตุผลระบุ ส่งต่อไปหน้าไหน · ชื่อหน้า · วิชาที่เลือกในผลลัพธ์ · ขนาด (วินิจฉัย)
+ *
  * v4.3.4 — วิชาที่มีครูสอนหลายคน: SGS แสดงนักเรียนซ้ำ 1 แถว/ครู → แถวเกิน 50 ตกหล่น (ผู้ใช้พบ 7 ต.ค. 2569)
  *   - ตั้งจำนวนต่อหน้าอย่างน้อย 100 (หรือ 3 เท่าของ TotalItems) · ถือว่ายังไม่ครบถ้า TotalPages > 1 ด้วย (ไม่ดูแค่ TotalItems)
  *
@@ -76,7 +80,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3.4';
+  var VERSION = '4.3.5';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -526,14 +530,27 @@
       fd.append(b.name + '.y', '1');
     } catch (e) { return Promise.resolve(clickFallback('สร้างข้อมูลฟอร์มไม่ได้: ' + (e && e.message || e))); }
     var url = form.getAttribute('action') || location.href;
+    var resp = null;
     return fetch(url, { method: 'POST', body: fd, credentials: 'same-origin', redirect: 'follow' })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(function (r) { resp = r; if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
       .then(function (html) {
         var doc = new DOMParser().parseFromString(html, 'text/html');
         var nf = doc.forms[0];
-        if (!nf) throw new Error('no form in response');
+        // v4.3.5: เหตุผลละเอียด (ส่งต่อไปหน้าไหน · ชื่อหน้า · วิชาที่เลือกในผลลัพธ์ · ขนาด) — ใช้วินิจฉัย "บันทึกเบื้องหลังไม่สำเร็จ"
+        var why = function (m) {
+          var info = [];
+          try {
+            if (resp && resp.redirected) info.push('ส่งต่อไป ' + String(resp.url || '').replace(/^https?:\/\/[^/]+/, ''));
+            var t = (doc.title || '').trim(); if (t) info.push('หน้า "' + t.slice(0, 40) + '"');
+            var sj = doc.getElementById('ctl00_PageContent_ClassSubjectIDFilter');
+            info.push(sj ? 'วิชาในผลลัพธ์: ' + ((sj.options[sj.selectedIndex] || {}).text || '-').trim().slice(0, 30) : 'ไม่มีเมนูวิชา');
+            info.push(Math.round(html.length / 1024) + ' KB');
+          } catch (e) {}
+          return new Error(m + (info.length ? ' · ' + info.join(' · ') : ''));
+        };
+        if (!nf) throw why('no form in response');
         // ต้องมีตารางของหน้านี้ในผลลัพธ์ (ไม่ใช่หน้า login/หน้า error)
-        if (!doc.querySelector('input[id*="' + PAGE.repeater + '"]')) throw new Error('response has no table');
+        if (!doc.querySelector('input[id*="' + PAGE.repeater + '"]')) throw why('response has no table');
         // 1) hidden fields ของ ASP.NET
         nf.querySelectorAll('input[type=hidden]').forEach(function (h) {
           if (!h.name || h.name.indexOf('__') !== 0) return;
@@ -1055,11 +1072,12 @@
       });
     }
     window.alert = origAlert;
-    var mustSave = H && (smFail || smPend || repaired);     // ทีละช่องไม่ครบ → ต้องกดบันทึกให้ค่าติด
+    var partial = !!(H && (smFail || smPend || repaired));                          // ทีละช่องไม่ครบ → ต้องกดบันทึกให้ค่าติด
+    var mustSave = PAGE.ajax && okCells > 0 && (!H || partial);                     // + ยืนยันไม่ได้ (ไม่มี PageMethods) → กดบันทึก
 
     log(box, '─────────────', '');
     log(box, (cfg.dryRun ? '[ทดลอง] ' : '✓ ') + 'เติม ' + okCells + ' ช่อง · นักเรียน ' + filledStudents + ' คน' + (cfg.auto ? ' (อัตโนมัติ)' : ''), cfg.dryRun ? 'warn' : 'ok');
-    if (H) log(box, '· SGS บันทึกทีละช่อง: ผ่าน ' + smOk + (smFail ? ' · ไม่ผ่าน ' + smFail : '') + (smPend ? ' · ยังไม่ตอบ ' + smPend : '') + (repaired ? ' · ใส่ค่าคืน ' + repaired + ' ช่อง (กรอบฟ้า)' : '') + (mustSave ? ' → ปุ่มบันทึกจะส่งค่าทั้งหมดอีกครั้ง' : ''), mustSave ? 'warn' : '');
+    if (H) log(box, '· SGS บันทึกทีละช่อง: ผ่าน ' + smOk + (smFail ? ' · ไม่ผ่าน ' + smFail : '') + (smPend ? ' · ยังไม่ตอบ ' + smPend : '') + (repaired ? ' · ใส่ค่าคืน ' + repaired + ' ช่อง (กรอบฟ้า)' : '') + (partial ? ' → ปุ่มบันทึกจะส่งค่าทั้งหมดอีกครั้ง' : ''), partial ? 'warn' : '');
     if (late.length) log(box, '· ข้อความจาก server: ' + late.slice(0, 3).join(' | ') + (late.length > 3 ? ' …' : ''), 'warn');
     if (plan.skipSame) log(box, '· เท่าเดิมอยู่แล้ว ข้าม ' + plan.skipSame + ' ช่อง');
     if (plan.skipDisabled) log(box, '· ข้ามช่องปิด/ยังไม่ติ๊ก: ' + plan.skipDisabled + ' ช่อง');
@@ -1074,7 +1092,7 @@
     var elsewhere = Object.keys(a.elsewhere);
     if (elsewhere.length) log(box, 'ℹ ข้อมูลชุดนี้มีส่วนที่ต้องไปหน้าอื่น: ' + elsewhere.map(function (n) { return n + ' (' + a.elsewhere[n].join(', ') + ')'; }).join(' · '));
     if (cfg.dryRun) log(box, 'ยังไม่บันทึกจริง — เอาเครื่องหมาย "ทดลอง" ออกแล้วกดอีกครั้ง', 'warn');
-    else if (!bad.length && !alerts.length && !mustSave) log(box, '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปได้เลย', 'ok');
+    else if (!bad.length && !alerts.length && !partial) log(box, '✓ เสร็จ — เปลี่ยนกลุ่มถัดไปได้เลย', 'ok');
 
     // ---- บันทึก: หน้าประเมินต้อง "เลือกทั้งหมด" ก่อน (SGS บันทึกเฉพาะแถวที่เลือก) แล้วส่งฟอร์มแบบไม่โหลดหน้าใหม่ ----
     // v4.3.3: หน้าคะแนน — คิวกดบันทึกเสมอ · โหมดครูกดตามตัวเลือก หรือเมื่อทีละช่องไม่ครบ (mustSave)
@@ -1451,7 +1469,8 @@
       if (!plan.cells.length) return { cls: 'ok', st: '= ตรงแล้ว (' + a.matched + ' คน)' };
       var box = document.createElement('div');
       qTrace('เติม ' + plan.cells.length + ' ช่อง' + (dry ? ' (ทดลอง)' : '') + ' แล้วบันทึก');
-      var res = await run({ text: ta.value, speed: speed.value, dryRun: dry, overwrite: true, auto: true, clickSave: true, noClick: true }, box, null);
+      // v4.3.5: หน้าคะแนน (ajax) กดบันทึกเฉพาะเมื่อทีละช่องไม่ครบ (run: mustSave) · หน้าประเมิน (ไม่ ajax) กดเสมอ
+      var res = await run({ text: ta.value, speed: speed.value, dryRun: dry, overwrite: true, auto: true, clickSave: false, noClick: true }, box, null);
       qTrace('ผล: ' + (res ? 'ok ' + res.ok + ' bad ' + res.bad + ' how ' + res.how : 'ไม่เติม'));
       if (!res) { var errs = box.querySelectorAll('.err'); return skip(errs.length ? errs[errs.length - 1].textContent.replace(/^✗\s*/, '') : 'ไม่เติม'); }
       if (res.how === 'clicked') return { cls: 'err', st: 'บันทึกแบบโหลดหน้าใหม่ — คลิก bookmarklet แล้วเริ่มคิวต่อ', fatal: true };
@@ -1459,7 +1478,7 @@
       if (res.bad) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง · ผิด ' + res.bad + ' ช่อง (ตรวจในตาราง)' };
       if (dry) return { cls: offNote ? 'skip' : 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + offNote };
       if (!res.how && !PAGE.ajax) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่ไม่ได้บันทึก (ปิด "กด บันทึก ให้")' };
-      return { cls: offNote ? 'skip' : 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '') + (res.how === 'fetched' ? ' · บันทึกแล้ว' : '') + offNote };
+      return { cls: offNote ? 'skip' : 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '') + (res.how === 'fetched' ? ' · บันทึกแล้ว' : PAGE.ajax ? ' · SGS ยืนยันทีละช่องครบ' : '') + offNote };
     }
     async function qRun() {
       if (Q.running) return;
