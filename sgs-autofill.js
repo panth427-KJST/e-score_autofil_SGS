@@ -4,6 +4,9 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.4 — วิชาที่มีครูสอนหลายคน: SGS แสดงนักเรียนซ้ำ 1 แถว/ครู → แถวเกิน 50 ตกหล่น (ผู้ใช้พบ 7 ต.ค. 2569)
+ *   - ตั้งจำนวนต่อหน้าอย่างน้อย 100 (หรือ 3 เท่าของ TotalItems) · ถือว่ายังไม่ครบถ้า TotalPages > 1 ด้วย (ไม่ดูแค่ TotalItems)
+ *
  * v4.3.3 — ยกเลิกการรอทีละช่องของ v4.3.2 (ทดสอบจริง: server ตอบเกิน 1 วิตั้งแต่ช่องแรก ใช้ไม่ได้) → กลับเป็น "เติมก่อน แล้วกดบันทึก" ที่เคยได้ผล
  *   - ยังห่อ SaveMe เพื่อฟังผล: เติมครบ → รอผลค้าง ≤ 5 วิ (SETTLE_MS ไม่ถือว่าผิด) → ช่องที่ SGS ล้าง/ค่าไม่ตรง ใส่ค่าคืน (ไม่ยิง onchange) → กดบันทึก
  *   - โหมดคิวกดบันทึกเสมอ (fetch · ล้มเหลว = หยุดคิว ไม่โหลดหน้า) · โหมดครูกดตามตัวเลือก หรือบังคับเมื่อทีละช่องไม่ครบ
@@ -73,7 +76,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3.3';
+  var VERSION = '4.3.4';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -397,7 +400,7 @@
   }
 
   function readSgsContext() {
-    var ctx = { code: '', subject: '', grade: '', section: '', total: null, pageSize: null };
+    var ctx = { code: '', subject: '', grade: '', section: '', total: null, pages: null, pageSize: null };
     var sel = document.getElementById('ctl00_PageContent_ClassSubjectIDFilter');
     if (sel && sel.selectedIndex >= 0 && sel.value !== '--ANY--') {
       var txt = (sel.options[sel.selectedIndex].text || '').trim();
@@ -408,15 +411,23 @@
     if (sec && sec.value !== '--ANY--') ctx.section = sec.value;
     var tot = document.getElementById('ctl00_PageContent_' + PAGE.pag + '__TotalItems');
     if (tot) { var n = parseInt(tot.textContent, 10); if (!isNaN(n)) ctx.total = n; }
+    var tp = document.getElementById('ctl00_PageContent_' + PAGE.pag + '__TotalPages');
+    if (tp) { var np = parseInt(tp.textContent || tp.value, 10); if (!isNaN(np)) ctx.pages = np; }
     var ps = document.getElementById('ctl00_PageContent_' + PAGE.pag + '__PageSize');
     if (ps) { var p = parseInt(ps.value, 10); if (!isNaN(p)) ctx.pageSize = p; }
     return ctx;
   }
+  // v4.3.4: วิชาครูหลายคน SGS แสดงนักเรียนซ้ำ 1 แถว/ครู → จำนวนแถวเกิน TotalItems ได้ (เดิมตั้ง 50 → แถวที่ 51+ ตกหล่น)
+  //   ถือว่า "ยังแสดงไม่ครบ" ถ้าแถวน้อยกว่า TotalItems หรือยังมีมากกว่า 1 หน้า (TotalPages)
+  function notAllShown(ctx, shown) { return (ctx.total != null && shown < ctx.total) || (ctx.pages != null && ctx.pages > 1); }
   function ensurePageSize(ctx, shown) {
-    if (ctx.total == null || shown >= ctx.total) return false;
+    if (!notAllShown(ctx, shown)) return false;
     var ps = document.getElementById('ctl00_PageContent_' + PAGE.pag + '__PageSize');
     if (!ps || typeof window.__doPostBack !== 'function') return false;
-    ps.value = String(Math.max(50, ctx.total));
+    var cur = parseInt(ps.value, 10) || 0;
+    var want = Math.max(100, (ctx.total || 0) * 3, ctx.pages > 1 && cur >= 100 ? cur * 2 : 0);   // อย่างน้อย 100 แถว (ครู 2–3 คน × กลุ่มใหญ่)
+    if (want <= cur && !(ctx.pages > 1)) return false;
+    ps.value = String(want);
     try { window.__doPostBack('ctl00$PageContent$' + PAGE.pag + '$_PageSizeButton', ''); } catch (e) { return false; }
     return true;
   }
@@ -1204,7 +1215,7 @@
       if (!autoOn() || AUTO.running || a.error) return;
       if (Q.mode === 'auto') { autoStop(); return; }          // v4.3 โหมดคิว: คิวเป็นผู้เติม
       if (!a.rows.length || a.codeMismatch || a.fullProblems.length || !a.hasFillable) { autoStop(); return; }
-      if (a.ctx.total != null && a.tbl.rows.length < a.ctx.total) { autoStop(); return; }
+      if (notAllShown(a.ctx, a.tbl.rows.length)) { autoStop(); return; }
       if (a.missing.length) {
         autoStop();
         status.className = 'kjst-status err';
@@ -1412,7 +1423,7 @@
       if (r2 === 'noopt') return skip('SGS ไม่มีกลุ่ม ' + it.sec);
       if (r2 !== 'ok') return { cls: 'err', st: 'เลือกกลุ่มไม่ได้: ' + r2, fatal: true };
       var a = analyze(ta.value);
-      if (!a.error && a.tbl.rows.length && a.ctx.total != null && a.tbl.rows.length < a.ctx.total) {
+      if (!a.error && a.tbl.rows.length && notAllShown(a.ctx, a.tbl.rows.length)) {
         var psId = 'ctl00_PageContent_' + PAGE.pag + '__PageSize', ps0 = document.getElementById(psId);
         qTrace('ตั้งจำนวนต่อหน้า');
         if (!ensurePageSize(a.ctx, a.tbl.rows.length)) return skip('แสดง ' + a.tbl.rows.length + ' จาก ' + a.ctx.total + ' คน ตั้งจำนวนต่อหน้าไม่ได้');
@@ -1429,7 +1440,7 @@
       if (!a.tbl.rows.length) return skip(PAGE.create ? 'ยังไม่สร้างตารางประเมินของวิชานี้ใน SGS' : 'ตารางว่าง (SGS ไม่มีกลุ่มนี้?)');
       if (a.parsed !== it.block.parsed) return skip('SGS เปิดวิชาอื่นอยู่ (' + (a.ctx.subject || '-') + ')');
       if (a.codeMismatch || !a.rows.length) return skip('ตารางไม่ใช่วิชา ' + it.block.code);
-      if (a.ctx.total != null && a.tbl.rows.length < a.ctx.total) return skip('แสดง ' + a.tbl.rows.length + ' จาก ' + a.ctx.total + ' คน');
+      if (notAllShown(a.ctx, a.tbl.rows.length)) return skip('แสดงไม่ครบ (' + a.tbl.rows.length + ' แถว · ' + (a.ctx.pages || 1) + ' หน้า)');
       if (a.fullProblems.length) return skip('คะแนนเต็ม SGS ไม่ตรง — ' + a.fullProblems.join(' · '));
       if (a.missing.length) return skip(a.missing.length + ' คนใน SGS ไม่มีในข้อมูล (' + a.missing.slice(0, 3).join(', ') + (a.missing.length > 3 ? ' …' : '') + ')');
       if (!a.det || a.det.group.name !== it.gname) return skip('รายชื่อในตารางเป็น ' + (a.det ? a.det.group.name : '-') + ' ไม่ใช่ ' + it.gname);
@@ -1530,7 +1541,7 @@
         status.className = 'kjst-status err'; status.textContent = ctxLine + '✗ ตารางไม่มีแถวของ ' + p.meta.code + ' (' + a.otherSubjectRows + ' แถวเป็นวิชาอื่น) — เลือกวิชาให้ตรง';
       } else if (a.fullProblems.length) {
         status.className = 'kjst-status err'; status.textContent = ctxLine + '✗ คะแนนเต็ม SGS ไม่ตรง e-Score: ' + a.fullProblems.join(' · ') + ' — แก้ใน SGS ก่อน';
-      } else if (a.ctx.total != null && a.tbl.rows.length < a.ctx.total) {
+      } else if (notAllShown(a.ctx, a.tbl.rows.length)) {
         var pk = PAGE.id + '|' + a.ctx.code + '|' + a.ctx.section;
         if (!autoPaged[pk] && ensurePageSize(a.ctx, a.tbl.rows.length)) {
           autoPaged[pk] = true; status.className = 'kjst-status warn';
