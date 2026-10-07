@@ -4,6 +4,9 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.6 — วินิจฉัยเพิ่ม (ไม่เปลี่ยนการทำงาน): สรุปคิวบอกผลทีละช่อง (ผ่าน/ไม่ผ่าน/ยังไม่ตอบ + ช่อง + ข้อความ server)
+ *   · บันทึกเบื้องหลังล้มเหลวบอก กลุ่มในผลลัพธ์ · จำนวนช่องข้อความ/เลขประจำตัว · TotalItems · ข้อความผิดพลาดบนหน้า
+ *
  * v4.3.5 — คิวหน้าคะแนน: ทดสอบจริงกดบันทึกเบื้องหลังได้ "response has no table" แต่คะแนนติดครบ (SGS บันทึกทีละช่องแล้ว)
  *   - คิว + หน้าคะแนน: กดบันทึกเฉพาะเมื่อทีละช่องไม่ครบ (ไม่ผ่าน/ยังไม่ตอบ/ใส่ค่าคืน) · ครบ = ไม่กด เดินคิวต่อ
  *   - บันทึกเบื้องหลังไม่สำเร็จ: เหตุผลระบุ ส่งต่อไปหน้าไหน · ชื่อหน้า · วิชาที่เลือกในผลลัพธ์ · ขนาด (วินิจฉัย)
@@ -80,7 +83,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3.5';
+  var VERSION = '4.3.6';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -544,6 +547,15 @@
             var t = (doc.title || '').trim(); if (t) info.push('หน้า "' + t.slice(0, 40) + '"');
             var sj = doc.getElementById('ctl00_PageContent_ClassSubjectIDFilter');
             info.push(sj ? 'วิชาในผลลัพธ์: ' + ((sj.options[sj.selectedIndex] || {}).text || '-').trim().slice(0, 30) : 'ไม่มีเมนูวิชา');
+            var sc = doc.getElementById('ctl00_PageContent_ClassSectionNoFilter');
+            if (sc) info.push('กลุ่ม: ' + ((sc.options[sc.selectedIndex] || {}).text || '-').trim());
+            var nIn = doc.querySelectorAll('input[type=text]').length, nSid = 0;
+            doc.querySelectorAll('td').forEach(function (td) { if (!td.children.length && /^\d{5}$/.test((td.textContent || '').trim())) nSid++; });
+            info.push('ช่องข้อความ ' + nIn + ' · เลขประจำตัว ' + nSid);
+            var ti = doc.getElementById('ctl00_PageContent_' + PAGE.pag + '__TotalItems'); if (ti) info.push('TotalItems ' + ti.textContent.trim());
+            var em = [].slice.call(doc.querySelectorAll('[id*="Validation"],[id*="Error"],[class*="error"],[style*="color:Red"],[style*="color: red"]'))
+              .map(function (e) { return (e.textContent || '').replace(/\s+/g, ' ').trim(); }).filter(Boolean)[0];
+            if (em) info.push('ข้อความ: ' + em.slice(0, 80));
             info.push(Math.round(html.length / 1024) + ' KB');
           } catch (e) {}
           return new Error(m + (info.length ? ' · ' + info.join(' · ') : ''));
@@ -1059,8 +1071,8 @@
       } else if (PAGE.ajax && !cfg.dryRun) { if (ui) ui.textContent = 'รอ SGS บันทึก…'; await sleep(1500); }
     } catch (e) { window.alert = origAlert; if (H) H.restore(); throw e; }
     if (H) H.restore();
-    var smOk = 0, smFail = 0, smPend = 0;
-    done.forEach(function (d) { if (!d.rec) return; if (!d.rec.done) smPend++; else if (d.rec.ok) smOk++; else smFail++; });
+    var smOk = 0, smFail = 0, smPend = 0, smBadCells = [];
+    done.forEach(function (d) { if (!d.rec) return; if (!d.rec.done) { smPend++; smBadCells.push(d.sid + ' ' + d.f + ' (ยังไม่ตอบ)'); } else if (d.rec.ok) smOk++; else { smFail++; smBadCells.push(d.sid + ' ' + d.f + (d.rec.msg ? ' (' + d.rec.msg.slice(0, 40) + ')' : '')); } });
 
     // ---- ซ่อม: ช่องที่ SGS ล้าง (บันทึกไม่ผ่าน / ล้างผิดช่องเพราะตัวแปรร่วม ctrlid) หรือค่าไม่ตรง → ใส่ค่าคืน (ไม่ยิง onchange) ก่อนกดบันทึก ----
     var bad = [], repaired = 0;
@@ -1108,7 +1120,8 @@
       else if (how === 'clicked') log(box, '💾 บันทึกเบื้องหลังไม่สำเร็จ (' + lastSaveError + ') จึงกดปุ่ม "บันทึก" ของ SGS ให้ — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อทำกลุ่มต่อไป', 'ok');
       else log(box, '⚠ หาปุ่ม "บันทึก" ของ SGS ไม่พบ — กรุณากดบันทึกเอง', 'warn');
     }
-    return { ok: okCells, bad: bad.length + alerts.length, how: how, students: filledStudents, repaired: repaired };
+    return { ok: okCells, bad: bad.length + alerts.length, how: how, students: filledStudents, repaired: repaired,
+             sm: H ? { ok: smOk, fail: smFail, pend: smPend, cells: smBadCells, late: late } : null };
   }
 
   /* -------------------------------------------------------------------------- */
@@ -1474,7 +1487,9 @@
       qTrace('ผล: ' + (res ? 'ok ' + res.ok + ' bad ' + res.bad + ' how ' + res.how : 'ไม่เติม'));
       if (!res) { var errs = box.querySelectorAll('.err'); return skip(errs.length ? errs[errs.length - 1].textContent.replace(/^✗\s*/, '') : 'ไม่เติม'); }
       if (res.how === 'clicked') return { cls: 'err', st: 'บันทึกแบบโหลดหน้าใหม่ — คลิก bookmarklet แล้วเริ่มคิวต่อ', fatal: true };
-      if (/^failed:/.test(res.how || '')) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่บันทึกเบื้องหลังไม่สำเร็จ (' + res.how.slice(7) + ') — หยุดคิว · กด "บันทึก" ของ SGS เองได้', fatal: true };
+      var smTxt = res.sm ? ' · ทีละช่อง: ผ่าน ' + res.sm.ok + (res.sm.fail ? ' · ไม่ผ่าน ' + res.sm.fail : '') + (res.sm.pend ? ' · ยังไม่ตอบ ' + res.sm.pend : '') + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '')
+        + (res.sm.cells.length ? ' [' + res.sm.cells.slice(0, 4).join(', ') + (res.sm.cells.length > 4 ? ' …' : '') + ']' : '') + (res.sm.late.length ? ' · server: ' + res.sm.late.slice(0, 2).join(' | ').slice(0, 100) : '') : '';
+      if (/^failed:/.test(res.how || '')) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง' + smTxt + ' — บันทึกเบื้องหลังไม่สำเร็จ (' + res.how.slice(7) + ') — หยุดคิว · กด "บันทึก" ของ SGS เองได้', fatal: true };
       if (res.bad) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง · ผิด ' + res.bad + ' ช่อง (ตรวจในตาราง)' };
       if (dry) return { cls: offNote ? 'skip' : 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + offNote };
       if (!res.how && !PAGE.ajax) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่ไม่ได้บันทึก (ปิด "กด บันทึก ให้")' };
