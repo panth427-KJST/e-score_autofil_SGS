@@ -4,6 +4,10 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.8 — คิวหน้าคุณลักษณะฯ (ทดสอบจริง): เปลี่ยนกลุ่มแล้ว SGS ตอบ server error "The transaction has already been completely released."
+ *   → เดิมรอ 90 วิแล้วหยุดทั้งคิว · ตอนนี้ดัก error ของ PageRequestManager (endRequest) ทันที · ลองซ้ำ 1 ครั้ง (เว้น 3 วิ)
+ *   · ยังผิด → ข้ามรายการนั้น (แดง) เดินคิวต่อ + รายการถัดไปเลือกวิชาใหม่เสมอ · ผิดติดกัน 2 รายการ → หยุดคิว
+ *
  * v4.3.7 — ผลทดสอบจริง: บันทึกทีละช่อง (SaveMe) ติดทุกครั้งแต่ตอบช้า · บันทึกเบื้องหลังได้ตารางว่าง (TotalItems 0)
  *   - รอผลท้ายกลุ่มสูงสุด 1 นาที (SETTLE_MS · ผู้ใช้กำหนด) ครบก่อนไปต่อทันที + แสดง "ยืนยันแล้ว x/y" (ทั้งโหมดครูและคิว)
  *   - คิว + หน้าคะแนน: ไม่ส่งบันทึกเบื้องหลัง · ยังไม่ยืนยัน/ไม่ผ่าน → สถานะส้ม พร้อมรายชื่อช่อง แล้วเดินคิวต่อ (ไม่หยุด)
@@ -87,7 +91,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3.7';
+  var VERSION = '4.3.8';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -1358,11 +1362,26 @@
       try { return !!(window.Sys && Sys.WebForms && Sys.WebForms.PageRequestManager.getInstance().get_isInAsyncPostBack()); } catch (e) { return false; }
     }
     // รอจน UpdatePanel แทนที่ element เดิม (= ตารางโหลดใหม่เสร็จ) → 'ok' | 'stop' | ข้อความผิดพลาด
+    // v4.3.8: ดักข้อผิดพลาดจาก server ของ async postback (เช่น "The transaction has already been completely released.")
+    //   เดิมไม่รู้ → รอจนหมด 90 วิ · ตอนคิวทำงานถือว่าจัดการแล้ว (ไม่ให้ SGS เด้ง error ในหน้า)
+    function qHookPrm() {
+      if (Q.prmHooked) return;
+      try {
+        Sys.WebForms.PageRequestManager.getInstance().add_endRequest(function (sender, args) {
+          var e = args && args.get_error && args.get_error();
+          if (!e) return;
+          Q.prmErr = { at: Date.now(), msg: String(e.message || e).replace(/^Sys\.WebForms\.PageRequestManagerServerErrorException:\s*/, '').slice(0, 120) };
+          if (Q.running) { try { args.set_errorHandled(true); } catch (x) {} }
+        });
+        Q.prmHooked = true;
+      } catch (e) {}
+    }
     async function qWaitReplaced(id, old) {
       var t0 = Date.now();
       while (Date.now() - t0 < 90000) {
         await sleep(300);
         if (Q.stop) return 'stop';
+        if (Q.prmErr && Q.prmErr.at >= t0 - 50 && !qInAsync()) return 'server:' + Q.prmErr.msg;
         var cur = document.getElementById(id);
         if (cur && cur !== old && !qInAsync()) { await sleep(500); return 'ok'; }
       }
@@ -1374,9 +1393,16 @@
       if (!sel) return 'ไม่พบเมนู';
       if (![].some.call(sel.options, function (o) { return o.value === value; })) return 'noopt';
       if (typeof window.__doPostBack !== 'function') return 'หน้า SGS ไม่มี __doPostBack';
-      sel.value = value;
-      try { window.__doPostBack(sel.name || id.replace(/_/g, '$'), ''); } catch (e) { return 'postback ล้มเหลว'; }
-      return await qWaitReplaced(id, sel);
+      var r = 'postback ล้มเหลว';
+      for (var k = 0; k < 2; k++) {                                       // server ตอบข้อผิดพลาด → รอ 3 วิ แล้วลองซ้ำ 1 ครั้ง
+        if (k) { await sleep(3000); if (Q.stop) return 'stop'; sel = document.getElementById(id) || sel; }
+        sel.value = value;
+        try { window.__doPostBack(sel.name || id.replace(/_/g, '$'), ''); } catch (e) { return 'postback ล้มเหลว'; }
+        r = await qWaitReplaced(id, sel);
+        if (!/^server:/.test(r)) return r;
+        qTrace('server error: ' + r.slice(7) + (k ? '' : ' → ลองซ้ำ'));
+      }
+      return r;
     }
     function qEsc(t) { return String(t).replace(/[&<>"]/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); }
     function qBuild() {
@@ -1452,18 +1478,21 @@
       var sel = document.getElementById(Q_SUBJ);
       if (!sel) return { cls: 'err', st: 'ไม่พบเมนูรายวิชา', fatal: true };
       qTrace('เริ่ม ' + it.label);
-      if (sel.value !== it.opt.value) {
+      if (Q.forceSubj || sel.value !== it.opt.value) {                    // หลัง server error สถานะ server อาจไม่ตรงเมนู → เลือกวิชาใหม่
         qTrace('เลือกวิชา ' + it.opt.value);
         var r1 = await qPostSelect(Q_SUBJ, it.opt.value);
         if (r1 === 'stop') return stopped;
         if (r1 === 'noopt') return skip('ไม่พบวิชาในเมนู SGS');
+        if (/^server:/.test(r1)) { Q.forceSubj = true; return { cls: 'err', st: 'เลือกวิชาไม่ได้ — SGS ตอบข้อผิดพลาด (ลองซ้ำแล้ว): ' + r1.slice(7), soft: true }; }
         if (r1 !== 'ok') return { cls: 'err', st: 'เลือกวิชาไม่ได้: ' + r1, fatal: true };
+        Q.forceSubj = false;
       }
       // SGS คงค่ากลุ่มเดิมเมื่อเปลี่ยนวิชา (ตารางอาจเป็นกลุ่มเดิม/ว่าง) → เลือกกลุ่มใหม่ทุกครั้ง
       qTrace('เลือกกลุ่ม ' + it.sec);
       var r2 = await qPostSelect(Q_SEC, it.sec);
       if (r2 === 'stop') return stopped;
       if (r2 === 'noopt') return skip('SGS ไม่มีกลุ่ม ' + it.sec);
+      if (/^server:/.test(r2)) { Q.forceSubj = true; return { cls: 'err', st: 'เลือกกลุ่มไม่ได้ — SGS ตอบข้อผิดพลาด (ลองซ้ำแล้ว): ' + r2.slice(7), soft: true }; }
       if (r2 !== 'ok') return { cls: 'err', st: 'เลือกกลุ่มไม่ได้: ' + r2, fatal: true };
       var a = analyze(ta.value);
       if (!a.error && a.tbl.rows.length && notAllShown(a.ctx, a.tbl.rows.length)) {
@@ -1516,7 +1545,9 @@
       if (!todo.length) return;
       var dry = dryCb.checked;
       if (!dry && !confirm('เติม' + (saveCb.checked ? ' + บันทึก' : '') + ' ' + todo.length + ' กลุ่มตามคิว ในหน้า ' + PAGE.name + ' ?\n\nเครื่องมือจะเปลี่ยนวิชา/กลุ่มใน SGS เอง · ไม่ผ่านด่านตรวจ = ข้าม · กด "หยุด" ได้ตลอด\n(ติ๊ก "ทดลอง" เพื่อเดินคิวก่อนได้)')) return;
-      Q.running = true; Q.stop = false; autoStop(); btn.disabled = true; out.innerHTML = '';
+      Q.running = true; Q.stop = false; Q.forceSubj = false; Q.prmErr = null; autoStop(); btn.disabled = true; out.innerHTML = '';
+      qHookPrm();
+      var softRun = 0;
       store(Q_TRACE, null); qTrace('เริ่มคิว ' + todo.length + ' กลุ่ม · ' + PAGE.id + (dry ? ' ทดลอง' : ''));
       todo.forEach(function (it) { it.st = 'รอ'; it.cls = ''; });
       qRender();
@@ -1529,6 +1560,9 @@
         it.st = r.st; it.cls = r.cls; qPaint(it);
         if (cnt[r.cls] != null) cnt[r.cls]++;
         if (r.fatal) { Q.stop = true; break; }
+        softRun = r.soft ? softRun + 1 : 0;                                 // server error ทำต่อได้ — แต่ติดกัน 2 รายการ = SGS มีปัญหา หยุด
+        if (softRun >= 2) { it.st += ' — หยุดคิว (SGS ผิดพลาดติดกัน ลองใหม่ภายหลัง)'; qPaint(it); Q.stop = true; break; }
+        if (r.soft) await sleep(3000);
         await sleep(dry ? 300 : 800);
       }
       todo.forEach(function (x) { if (x.st === 'รอ' || x.st === 'หยุด') { x.st = 'ยังไม่ทำ (หยุด)'; x.cls = 'skip'; } });
