@@ -4,6 +4,10 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.7 — ผลทดสอบจริง: บันทึกทีละช่อง (SaveMe) ติดทุกครั้งแต่ตอบช้า · บันทึกเบื้องหลังได้ตารางว่าง (TotalItems 0)
+ *   - รอผลท้ายกลุ่มสูงสุด 1 นาที (SETTLE_MS · ผู้ใช้กำหนด) ครบก่อนไปต่อทันที + แสดง "ยืนยันแล้ว x/y" (ทั้งโหมดครูและคิว)
+ *   - คิว + หน้าคะแนน: ไม่ส่งบันทึกเบื้องหลัง · ยังไม่ยืนยัน/ไม่ผ่าน → สถานะส้ม พร้อมรายชื่อช่อง แล้วเดินคิวต่อ (ไม่หยุด)
+ *
  * v4.3.6 — วินิจฉัยเพิ่ม (ไม่เปลี่ยนการทำงาน): สรุปคิวบอกผลทีละช่อง (ผ่าน/ไม่ผ่าน/ยังไม่ตอบ + ช่อง + ข้อความ server)
  *   · บันทึกเบื้องหลังล้มเหลวบอก กลุ่มในผลลัพธ์ · จำนวนช่องข้อความ/เลขประจำตัว · TotalItems · ข้อความผิดพลาดบนหน้า
  *
@@ -83,7 +87,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3.6';
+  var VERSION = '4.3.7';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -680,7 +684,7 @@
   /* หน้าคะแนน (MID/FINAL): SGS บันทึกทีละช่องด้วย PageMethods.SaveMe (ตอบ "True" = บันทึกแล้ว แล้วเรียก GetGr แสดงผลรวม)
    *   ไม่ผ่าน → alert + ล้าง "ช่องล่าสุด" (ตัวแปรร่วม ctrlid — กรอกเร็วกว่า server ตอบ อาจล้างผิดช่อง)
    *   v4.3.3: ห่อ SaveMe/GetGr เพื่อ "ฟังผล" อย่างเดียว (ไม่รอทีละช่อง) → เติมครบแล้วรอผลค้างไม่เกิน SETTLE_MS → ซ่อมช่อง → กดบันทึก */
-  var SETTLE_MS = 5000;
+  var SETTLE_MS = window.__kjstSettleMs || 60000;      // v4.3.7 ผู้ใช้กำหนด 1 นาที (ทดสอบจริง: บันทึกติดทุกครั้งแต่ server ตอบช้า) · __kjstSettleMs = ใช้ในชุดทดสอบ
   function smHook() {
     var pm = window.PageMethods;
     if (!pm || typeof pm.SaveMe !== 'function') return null;           // ไม่มี → แบบเดิม (รอ 1.5 วิ)
@@ -1064,10 +1068,17 @@
         if (c.row.sid !== lastSid) { lastSid = c.row.sid; filledStudents++; }
         if (!cfg.dryRun) { if (ui) ui.textContent = 'กำลังเติม… ' + filledStudents + '/' + total; await sleep(PAGE.ajax ? delay : 15); }
       }
-      // รอผลบันทึกทีละช่องที่ยังค้าง (ไม่เกิน SETTLE_MS — ช้าไม่ถือว่าผิด ปุ่มบันทึกจะส่งซ้ำ)
+      // รอผลบันทึกทีละช่องที่ยังค้าง (ไม่เกิน SETTLE_MS — ครบก่อนไปต่อทันที · แสดงความคืบหน้า)
       if (H && done.length) {
-        if (ui) ui.textContent = 'รอ SGS ตอบ…';
-        await smWait(function () { return done.every(function (d) { return !d.rec || d.rec.done; }); }, SETTLE_MS);
+        var w0 = Date.now(), nRec = done.filter(function (d) { return d.rec; }).length;
+        while (true) {
+          var nDone = done.filter(function (d) { return d.rec && d.rec.done; }).length;
+          if (nDone >= nRec || Date.now() - w0 >= SETTLE_MS) break;
+          var msg = 'รอ SGS บันทึก… ยืนยันแล้ว ' + nDone + '/' + nRec + ' (' + Math.round((Date.now() - w0) / 1000) + ' วิ)';
+          if (ui) ui.textContent = msg;
+          if (cfg.progress) cfg.progress(msg);
+          await sleep(500);
+        }
       } else if (PAGE.ajax && !cfg.dryRun) { if (ui) ui.textContent = 'รอ SGS บันทึก…'; await sleep(1500); }
     } catch (e) { window.alert = origAlert; if (H) H.restore(); throw e; }
     if (H) H.restore();
@@ -1108,7 +1119,8 @@
 
     // ---- บันทึก: หน้าประเมินต้อง "เลือกทั้งหมด" ก่อน (SGS บันทึกเฉพาะแถวที่เลือก) แล้วส่งฟอร์มแบบไม่โหลดหน้าใหม่ ----
     // v4.3.3: หน้าคะแนน — คิวกดบันทึกเสมอ · โหมดครูกดตามตัวเลือก หรือเมื่อทีละช่องไม่ครบ (mustSave)
-    if (!cfg.dryRun && (cfg.clickSave || !PAGE.ajax || mustSave) && okCells > 0) {
+    // v4.3.7: คิว + หน้าคะแนน ไม่ส่งบันทึกเบื้องหลัง (ทดสอบจริง: server ตอบตารางว่าง TotalItems 0) — พึ่ง SaveMe ทีละช่อง
+    if (!cfg.dryRun && !(cfg.noClick && PAGE.ajax && H) && (cfg.clickSave || !PAGE.ajax || mustSave) && okCells > 0) {   // ฟังผลไม่ได้ (ไม่มี PageMethods) → ยังบันทึกเบื้องหลัง
       if (PAGE.toggleAll) {
         if (selectAllRows()) log(box, '☑ เลือกทั้งหมดให้แล้ว');
         else log(box, '⚠ หากล่อง "เลือกทั้งหมด" ไม่พบ — SGS อาจไม่บันทึก กรุณาติ๊กเองแล้วกดบันทึก', 'warn');
@@ -1482,18 +1494,21 @@
       if (!plan.cells.length) return { cls: 'ok', st: '= ตรงแล้ว (' + a.matched + ' คน)' };
       var box = document.createElement('div');
       qTrace('เติม ' + plan.cells.length + ' ช่อง' + (dry ? ' (ทดลอง)' : '') + ' แล้วบันทึก');
-      // v4.3.5: หน้าคะแนน (ajax) กดบันทึกเฉพาะเมื่อทีละช่องไม่ครบ (run: mustSave) · หน้าประเมิน (ไม่ ajax) กดเสมอ
-      var res = await run({ text: ta.value, speed: speed.value, dryRun: dry, overwrite: true, auto: true, clickSave: false, noClick: true }, box, null);
+      // v4.3.7: หน้าคะแนน (ajax) ไม่ส่งบันทึกเบื้องหลัง — รอ SaveMe ≤ SETTLE_MS แล้วรายงาน · หน้าประเมิน (ไม่ ajax) กดบันทึกเสมอ
+      var res = await run({ text: ta.value, speed: speed.value, dryRun: dry, overwrite: true, auto: true, clickSave: false, noClick: true,
+                            progress: function (m) { it.st = m; qPaint(it); } }, box, null);
       qTrace('ผล: ' + (res ? 'ok ' + res.ok + ' bad ' + res.bad + ' how ' + res.how : 'ไม่เติม'));
       if (!res) { var errs = box.querySelectorAll('.err'); return skip(errs.length ? errs[errs.length - 1].textContent.replace(/^✗\s*/, '') : 'ไม่เติม'); }
       if (res.how === 'clicked') return { cls: 'err', st: 'บันทึกแบบโหลดหน้าใหม่ — คลิก bookmarklet แล้วเริ่มคิวต่อ', fatal: true };
       var smTxt = res.sm ? ' · ทีละช่อง: ผ่าน ' + res.sm.ok + (res.sm.fail ? ' · ไม่ผ่าน ' + res.sm.fail : '') + (res.sm.pend ? ' · ยังไม่ตอบ ' + res.sm.pend : '') + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '')
         + (res.sm.cells.length ? ' [' + res.sm.cells.slice(0, 4).join(', ') + (res.sm.cells.length > 4 ? ' …' : '') + ']' : '') + (res.sm.late.length ? ' · server: ' + res.sm.late.slice(0, 2).join(' | ').slice(0, 100) : '') : '';
+      if (res.sm && (res.sm.fail || res.sm.pend) && PAGE.ajax)
+        return { cls: 'skip', st: 'เติม ' + res.ok + ' ช่อง' + smTxt + ' — ยังไม่ยืนยันใน ' + Math.round(SETTLE_MS / 1000) + ' วิ: ตรวจใน SGS หรือรันคิวซ้ำ (เติมเฉพาะช่องที่ยังไม่ตรง)' + offNote };
       if (/^failed:/.test(res.how || '')) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง' + smTxt + ' — บันทึกเบื้องหลังไม่สำเร็จ (' + res.how.slice(7) + ') — หยุดคิว · กด "บันทึก" ของ SGS เองได้', fatal: true };
       if (res.bad) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง · ผิด ' + res.bad + ' ช่อง (ตรวจในตาราง)' };
       if (dry) return { cls: offNote ? 'skip' : 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + offNote };
       if (!res.how && !PAGE.ajax) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่ไม่ได้บันทึก (ปิด "กด บันทึก ให้")' };
-      return { cls: offNote ? 'skip' : 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '') + (res.how === 'fetched' ? ' · บันทึกแล้ว' : PAGE.ajax ? ' · SGS ยืนยันทีละช่องครบ' : '') + offNote };
+      return { cls: offNote ? 'skip' : 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '') + (res.how === 'fetched' ? ' · บันทึกแล้ว' : res.sm ? ' · SGS ยืนยันทีละช่องครบ' : '') + offNote };
     }
     async function qRun() {
       if (Q.running) return;
