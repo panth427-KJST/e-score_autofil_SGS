@@ -4,6 +4,9 @@
  * ----------------------------------------------------------------------------
  * โรงเรียนกาญจนาภิเษกวิทยาลัย สุราษฎร์ธานี
  *
+ * v4.3.9 — บันทึกเบื้องหลังได้ "ตารางว่าง" แต่ผู้ใช้ยืนยันว่าบันทึกติด (หน้าการอ่านฯ/คุณลักษณะฯ) → ถือว่าบันทึกแล้ว ถ้าวิชา+กลุ่มในผลลัพธ์ตรงหน้าปัจจุบัน
+ *   · โหมดครู: เลือกกลุ่มเดิมซ้ำให้ตารางกลับมา (ไม่กดปุ่มจริง/ไม่โหลดหน้า) · คิว: รายการถัดไปเลือกวิชา+กลุ่มใหม่ (Q.forceSubj)
+ *
  * v4.3.8 — คิวหน้าคุณลักษณะฯ (ทดสอบจริง): เปลี่ยนกลุ่มแล้ว SGS ตอบ server error "The transaction has already been completely released."
  *   → เดิมรอ 90 วิแล้วหยุดทั้งคิว · ตอนนี้ดัก error ของ PageRequestManager (endRequest) ทันที · ลองซ้ำ 1 ครั้ง (เว้น 3 วิ)
  *   · ยังผิด → ข้ามรายการนั้น (แดง) เดินคิวต่อ + รายการถัดไปเลือกวิชาใหม่เสมอ · ผิดติดกัน 2 รายการ → หยุดคิว
@@ -91,7 +94,7 @@
 (function () {
   'use strict';
 
-  var VERSION = '4.3.8';
+  var VERSION = '4.3.9';
   var STORE_KEY = 'kjst_sgs_payload';
   var STORE_OPT = 'kjst_sgs_opts';
 
@@ -570,7 +573,15 @@
         };
         if (!nf) throw why('no form in response');
         // ต้องมีตารางของหน้านี้ในผลลัพธ์ (ไม่ใช่หน้า login/หน้า error)
-        if (!doc.querySelector('input[id*="' + PAGE.repeater + '"]')) throw why('response has no table');
+        // v4.3.9: ทดสอบจริง (หน้าคะแนน/การอ่านฯ) — บันทึกติดแต่ SGS ตอบตารางว่าง (TotalItems 0) · วิชา+กลุ่มในผลลัพธ์ตรงหน้าปัจจุบัน = บันทึกแล้ว
+        var empty = false;
+        if (!doc.querySelector('input[id*="' + PAGE.repeater + '"]')) {
+          var vOf = function (d0, x) { var e = d0.getElementById('ctl00_PageContent_' + x); return e ? e.value : null; };
+          var same = vOf(doc, 'ClassSubjectIDFilter') != null && vOf(doc, 'ClassSubjectIDFilter') === vOf(document, 'ClassSubjectIDFilter')
+                     && vOf(doc, 'ClassSectionNoFilter') === vOf(document, 'ClassSectionNoFilter');
+          if (!same) throw why('response has no table');
+          empty = true;
+        }
         // 1) hidden fields ของ ASP.NET
         nf.querySelectorAll('input[type=hidden]').forEach(function (h) {
           if (!h.name || h.name.indexOf('__') !== 0) return;
@@ -589,7 +600,7 @@
         if (pans.length) panelId = pans[0].id;
         if (panelId) document.getElementById(panelId).innerHTML = doc.getElementById(panelId).innerHTML;
         else form.innerHTML = nf.innerHTML;
-        return 'fetched';
+        return empty ? 'fetched-empty' : 'fetched';
       })
       .catch(function (e) { return clickFallback(e && e.message || e); });
   }
@@ -1132,6 +1143,13 @@
       if (ui) ui.textContent = 'กำลังบันทึก SGS…';
       var how = await saveSgs(!!cfg.noClick);
       if (/^failed:/.test(how)) log(box, '✗ บันทึกเบื้องหลังไม่สำเร็จ (' + how.slice(7) + ') — ไม่ได้กดปุ่มจริง (กันหน้าโหลดใหม่) · ค่าที่เติมยังอยู่ในตาราง กด "บันทึก" ของ SGS เองได้', 'err');
+      else if (how === 'fetched-empty') {
+        log(box, '💾 บันทึกใน SGS แล้ว — SGS แสดงตารางว่างหลังบันทึก' + (cfg.noClick ? '' : ' กำลังโหลดกลุ่มเดิมใหม่…'), 'ok');
+        if (!cfg.noClick) {                                                 // โหมดครู: เลือกกลุ่มเดิมซ้ำให้ตารางกลับมา (คิวเลือกใหม่เองในรายการถัดไป)
+          var secEl = document.getElementById('ctl00_PageContent_ClassSectionNoFilter');
+          if (secEl && secEl.value && !/ANY|PLEASE/.test(secEl.value) && typeof window.__doPostBack === 'function') { try { window.__doPostBack(secEl.name || 'ctl00$PageContent$ClassSectionNoFilter', ''); } catch (e) {} }
+        }
+      }
       else if (how === 'fetched') log(box, '💾 บันทึกใน SGS แล้ว (ไม่ต้องโหลดหน้าใหม่)' + (Object.keys(PAGE.compare).length ? ' — ดูผลสรุปที่ SGS คำนวณในบรรทัดสถานะ' : ''), 'ok');
       else if (how === 'clicked') log(box, '💾 บันทึกเบื้องหลังไม่สำเร็จ (' + lastSaveError + ') จึงกดปุ่ม "บันทึก" ของ SGS ให้ — หน้าจะโหลดใหม่ คลิก bookmarklet อีกครั้งเพื่อทำกลุ่มต่อไป', 'ok');
       else log(box, '⚠ หาปุ่ม "บันทึก" ของ SGS ไม่พบ — กรุณากดบันทึกเอง', 'warn');
@@ -1529,6 +1547,7 @@
       qTrace('ผล: ' + (res ? 'ok ' + res.ok + ' bad ' + res.bad + ' how ' + res.how : 'ไม่เติม'));
       if (!res) { var errs = box.querySelectorAll('.err'); return skip(errs.length ? errs[errs.length - 1].textContent.replace(/^✗\s*/, '') : 'ไม่เติม'); }
       if (res.how === 'clicked') return { cls: 'err', st: 'บันทึกแบบโหลดหน้าใหม่ — คลิก bookmarklet แล้วเริ่มคิวต่อ', fatal: true };
+      if (res.how === 'fetched-empty') Q.forceSubj = true;                  // ตารางว่างหลังบันทึก → รายการถัดไปเลือกวิชา+กลุ่มใหม่
       var smTxt = res.sm ? ' · ทีละช่อง: ผ่าน ' + res.sm.ok + (res.sm.fail ? ' · ไม่ผ่าน ' + res.sm.fail : '') + (res.sm.pend ? ' · ยังไม่ตอบ ' + res.sm.pend : '') + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '')
         + (res.sm.cells.length ? ' [' + res.sm.cells.slice(0, 4).join(', ') + (res.sm.cells.length > 4 ? ' …' : '') + ']' : '') + (res.sm.late.length ? ' · server: ' + res.sm.late.slice(0, 2).join(' | ').slice(0, 100) : '') : '';
       if (res.sm && (res.sm.fail || res.sm.pend) && PAGE.ajax)
@@ -1537,7 +1556,7 @@
       if (res.bad) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง · ผิด ' + res.bad + ' ช่อง (ตรวจในตาราง)' };
       if (dry) return { cls: offNote ? 'skip' : 'ok', st: '[ทดลอง] จะเติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + offNote };
       if (!res.how && !PAGE.ajax) return { cls: 'err', st: 'เติม ' + res.ok + ' ช่อง แต่ไม่ได้บันทึก (ปิด "กด บันทึก ให้")' };
-      return { cls: offNote ? 'skip' : 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '') + (res.how === 'fetched' ? ' · บันทึกแล้ว' : res.sm ? ' · SGS ยืนยันทีละช่องครบ' : '') + offNote };
+      return { cls: offNote ? 'skip' : 'ok', st: '✓ เติม ' + res.ok + ' ช่อง ' + res.students + ' คน' + (res.repaired ? ' · ใส่ค่าคืน ' + res.repaired : '') + (/^fetched/.test(res.how || '') ? ' · บันทึกแล้ว' : res.sm ? ' · SGS ยืนยันทีละช่องครบ' : '') + offNote };
     }
     async function qRun() {
       if (Q.running) return;
